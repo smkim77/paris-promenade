@@ -27,6 +27,9 @@ const JUMP_TIME := 0.55
 const FLY_REACH := 0.2
 const TERRACE_HALF := 0.2
 const HUD_H := 46.0
+const SPRAY_LEN := 650.0       # the cleaner's spray covers ±650 units around the truck…
+const SPRAY_REACH := 0.42      # …up to 0.42 road units in from the curb
+const WRECK_LANE := 1.38       # hard mode: burning cars in the parking lane along the curb
 
 const PLACES := [
 	{"name": "Tour Eiffel", "ko": "에펠탑", "street": "Avenue de Suffren", "arr": "7e"},
@@ -49,6 +52,7 @@ var C_COATS := [Color("2f5d46"), Color("1d3b6e"), Color("8c2a2a"), Color("d9a441
 var C_HEADS := ["3a2a1e", "1b1e24", "c9a066", "7a4a2a", "helmet", "beret"]
 var C_DOGS := [Color("8a5a2b"), Color("e8dcc6"), Color("2b2b2b"), Color("b98a4e"), Color("d8d2c4"), Color("5b3a24")]
 var C_PEER_COATS := [Color("4a5568"), Color("5b4636"), Color("2f5d46"), Color("6b3a4a")]
+var C_LOOTER_COATS := [Color("1b1e24"), Color("2a2c30"), Color("33363d"), Color("3a3330"), Color("2b3340"), Color("4a4f57")]
 var ROOFS := []
 
 var font: Font = preload("res://fonts/korean.tres")
@@ -104,6 +108,14 @@ var birds: Array = []
 var drops: Array = []
 var stains: Array = []
 var texts: Array = []
+var trucks: Array = []         # street cleaners; in hard mode a gang of looters running up the street instead
+var fires: Array = []          # hard mode: burning bins / rubbish heaps, and patches of fire left by Molotovs
+var molotovs: Array = []
+var wrecks: Array = []         # hard mode: cars burning by the curb (scenery only)
+var fire_t := 0.0
+var molot_t := 0.0
+var wreck_t := 0.0
+var clean_t := 0.0
 var edge_t := 0.0
 var edge_side := 0
 var spawn_t := 0.0
@@ -127,6 +139,7 @@ var _i := PackedInt32Array()
 var ga := 1.0                  # global alpha, like ctx.globalAlpha
 var t_o := Vector2.ZERO        # local transform for the entity being drawn: p * t_s + t_o
 var t_s := Vector2.ONE
+var t_r := 0.0
 # the segment being drawn (see P)
 var _ax := 0.0
 var _ay := 0.0
@@ -166,7 +179,9 @@ func _ready() -> void:
 	_set_mode(hard)
 	_layout()
 	reset()
-	# `godot --path . -- --autoplay` starts walking at once (used for headless smoke tests)
+	# `godot --path . -- --autoplay [--hard]` starts walking at once (used for smoke tests)
+	if OS.get_cmdline_user_args().has("--hard"):
+		_set_mode(true)
 	if OS.get_cmdline_user_args().has("--autoplay"):
 		start()
 
@@ -385,6 +400,14 @@ func reset() -> void:
 	drops = []
 	stains = []
 	texts = []
+	trucks = []
+	fires = []
+	molotovs = []
+	wrecks = []
+	fire_t = 3.0
+	molot_t = 3.0
+	wreck_t = 2.0
+	clean_t = 14.0
 	edge_t = 0.0
 	edge_side = 0
 	score = 0.0
@@ -420,16 +443,22 @@ func start() -> void:
 	pause_btn.text = "II"
 	plate = {"text": PLACES[0].name, "ko": PLACES[0].ko, "life": 2.6}
 	sfx.play("start")
+	if hard:
+		sfx.music_play()       # hard mode: the riot piece (the normal-mode waltz isn't ported yet)
+	else:
+		sfx.music_stop()
 
 
 func toggle_pause() -> void:
 	if state == PLAY:
 		state = PAUSED
 		drag = {}
+		sfx.music_pause(true)
 		pause_btn.text = "▶"
 	elif state == PAUSED:
 		state = PLAY
 		pause_btn.text = "II"
+		sfx.music_pause(false)
 
 
 func game_over() -> void:
@@ -437,6 +466,7 @@ func game_over() -> void:
 	pause_btn.visible = false
 	flash = {}
 	shake = 0.0
+	sfx.music_stop()
 	sfx.play("over")
 	var d := floori(dist)
 	var p: Dictionary = PLACES[place_at(dist)]
@@ -586,6 +616,102 @@ func make_car(lane: int, dir: int, x = null) -> Dictionary:
 		"color": C_CARS.pick_random()}
 
 
+## stable pseudo-random value in [0, 1) per seed, so the same looters keep the same look
+func seat_rand(sd: float, side: float) -> float:
+	var v := sin(sd * 12.9898 + side * 78.233) * 43758.5453
+	return v - floorf(v)
+
+
+## Paris street-cleaning truck driving slowly up the street, hosing the curb-side edge;
+## in hard mode a gang of looters running up the street instead
+func spawn_cleaner() -> void:
+	var z := pz() + 9000.0 + randf() * 3000.0
+	var side: int = seg_at(z).side
+	var d := 0.0
+	while d <= 16000.0:      # only where the street keeps the same side while the truck is in view
+		var sg := seg_at(z + d)
+		if sg.side != side or sg.flip_x:
+			return
+		d += 600.0
+	trucks.append({"z": z, "v": 450.0 + randf() * 150.0, "t": 0.0, "march": hard, "seed": randf() * 100.0, "throw_t": 0.0, "throw_j": -1})
+
+
+## how far the wet patch reaches in from the curb at world z: widest beside the truck, tapering
+## to nothing at both ends, with a ragged edge that stays put on the pavement
+func wet_reach(tr: Dictionary, z: float) -> float:
+	var d: float = absf(z - tr.z) / SPRAY_LEN
+	if d >= 1.0:
+		return 0.0
+	var taper := pow(1.0 - d * d, 0.6)
+	var ragged := 0.74 + 0.14 * sin(z * 0.011) + 0.08 * sin(z * 0.0043 + 1.3) + 0.04 * sin(z * 0.031)
+	return SPRAY_REACH * taper * ragged
+
+
+## a car set alight in the parking lane, far up the street
+func spawn_wreck() -> void:
+	var z := position_z + DRAW * SEG_LEN * 0.85
+	if near_crossing(z) or seg_at(z).flip_x:
+		return
+	wrecks.append({"z": z, "t": randf() * 5.0, "seed": randf() * 10.0, "color": C_CARS.pick_random()})
+
+
+## a street bin set alight (or, half the time, a heap of rubbish bags and boxes)
+func spawn_fire() -> void:
+	var z := position_z + DRAW * SEG_LEN * 0.8
+	if near_crossing(z):
+		return
+	var seg := seg_at(z)
+	fires.append({"z": z, "x": (randf() * 2.0 - 1.0) * (seg.w - 0.25), "kind": "bin", "pile": randf() < 0.5,
+		"t": randf() * 5.0, "seed": randf() * 10.0, "r": 0.16, "life": 1.0})
+
+
+## a Molotov lobbed in from the street side, aimed just ahead of the walker (its ring on the
+## ground shows where it will land). Usually a looter in view throws it.
+func throw_molotov() -> void:
+	var T := maxf(0.95, 1.35 - dist / 2500.0)
+	var z := pz() + speed * T
+	var seg := seg_at(z)
+	var x := clampf(player_x + (randf() - 0.5) * 0.5, -seg.w + 0.15, seg.w - 0.15)
+	var side: int = seg_at(pz()).side
+	var sx := -20.0 if side > 0 else W + 20.0
+	var sy := H * (0.5 + randf() * 0.2)
+	var throwers := []
+	var pi_ := floori(position_z / SEG_LEN)
+	for i in range(pi_ + 4, mini(pi_ + 36, segs.size())):
+		var sg: Dictionary = segs[i]
+		var dz := terrace_z(sg) - position_z
+		if sg.terrace and i % 2 == 0 and dz > 900.0 and dz < 7000.0:
+			throwers.append(sg)
+	for tr in trucks:
+		if tr.march and tr.z - position_z > 900.0 and tr.z - position_z < 7000.0:
+			throwers.append(tr)
+	if throwers.size() and randf() < 0.8:
+		var th: Dictionary = throwers.pick_random()
+		var hand := {}
+		if th.has("march"):
+			var j := randi() % 11
+			var zj: float = th.z + (j - 5) * SPRAY_LEN * 0.17
+			var sg := seg_at(zj)
+			th.throw_j = j
+			th.throw_t = 0.5
+			hand = to_screen(zj, sg.side * (-sg.w + 0.1), 950)
+		else:
+			th["throw_at"] = run_time
+			hand = to_screen(terrace_z(th), terrace_x(th), 950)
+		if not hand.is_empty():
+			sx = hand.x
+			sy = hand.y
+	molotovs.append({"sx": sx, "sy": sy, "z": z, "x": x, "t": 0.0, "T": T, "spin": randf() * 6.0})
+	sfx.play("throw")
+
+
+## a patch of fire grows in a flash, burns, then dies down in its last second
+func fire_scale(f: Dictionary) -> float:
+	if f.kind == "bin":
+		return 1.0
+	return minf(1.0, f.t / 0.25) * clampf(f.life, 0.0, 1.0)
+
+
 func terrace_z(s: Dictionary) -> float:
 	return (s.i + 0.5) * SEG_LEN
 
@@ -712,6 +838,48 @@ func update(dt: float) -> void:
 		c.cars = c.cars.filter(func(car): return absf(car.x) < 7.0)
 	crossings = crossings.filter(func(c): return c.z1 > position_z)
 
+	if dist > 80.0:
+		clean_t -= dt
+		if clean_t <= 0.0:
+			spawn_cleaner()
+			clean_t = 16.0 + randf() * 12.0
+	for tr in trucks:
+		tr.z += tr.v * dt
+		tr.t += dt
+		tr.throw_t = maxf(0.0, tr.throw_t - dt)
+	if hard:
+		fire_t -= dt
+		if fire_t <= 0.0:
+			spawn_fire()
+			fire_t = maxf(2.4, 6.0 - dist / 250.0) * (0.7 + randf() * 0.6)
+		wreck_t -= dt
+		if wreck_t <= 0.0:
+			spawn_wreck()
+			wreck_t = 6.0 + randf() * 9.0
+		if dist > 20.0:
+			molot_t -= dt
+			if molot_t <= 0.0:
+				throw_molotov()
+				molot_t = maxf(1.3, 4.0 - dist / 250.0) * (0.7 + randf() * 0.6)
+	for f in fires:
+		f.t += dt
+		if f.kind == "patch":
+			f.life -= dt
+	for w in wrecks:
+		w.t += dt
+	# a Molotov smashes where it lands: a direct hit if you're there, and a patch of fire either way
+	for i in range(molotovs.size() - 1, -1, -1):
+		var m: Dictionary = molotovs[i]
+		m.t += dt
+		if m.t < m.T:
+			continue
+		molotovs.remove_at(i)
+		sfx.play("shatter")
+		fires.append({"z": m.z, "x": m.x, "r": 0.28, "kind": "patch", "pile": false, "t": 0.0, "life": 4.5, "seed": randf() * 10.0})
+		if invuln <= 0.0 and absf(m.x - player_x) < 0.3 and absf(m.z - p_z) < 600.0:
+			if take_hit("화염병이다!", Color(0.94, 0.47, 0.12, 0.5), "burn"):
+				return
+
 	if jump_t > 0.0:
 		jump_t = maxf(0.0, jump_t - dt)
 	for p in poops:
@@ -810,7 +978,33 @@ func update(dt: float) -> void:
 			if absf(terrace_z(s) - p_z) > reach + 60.0:
 				continue
 			if absf(player_x - terrace_x(s)) < TERRACE_HALF + 0.06:
-				if take_hit("Attention! 테라스!", Color(0.55, 0.16, 0.16, 0.35), "crash"):
+				var over_t := take_hit("약탈자와 부딪혔다!", Color(0.78, 0.24, 0.16, 0.4), "grumble") if hard \
+					else take_hit("Attention! 테라스!", Color(0.55, 0.16, 0.16, 0.35), "crash")
+				if over_t:
+					return
+				break
+	# fire: a burning bin is too tall to jump; a patch of fire on the ground can be jumped
+	if invuln <= 0.0:
+		for f in fires:
+			if absf(f.z - p_z) > reach + 40.0:
+				continue
+			if f.kind == "patch" and airborne():
+				continue
+			var r: float = 0.16 if f.kind == "bin" else f.r * fire_scale(f)
+			if r > 0.04 and absf(f.x - player_x) < r + 0.07:
+				var label := "앗 뜨거! 불길이다!"
+				if f.kind == "bin":
+					label = "앗 뜨거! 쓰레기 더미가 불타요!" if f.pile else "앗 뜨거! 쓰레기통이 불타요!"
+				if take_hit(label, Color(0.94, 0.47, 0.12, 0.45), "burn"):
+					return
+				break
+	# the street cleaner's spray along the curb (or the looters' gang, in the same stretch)
+	if invuln <= 0.0:
+		for tr in trucks:
+			if pseg.side * player_x < -pseg.w + wet_reach(tr, p_z):
+				var over_s := take_hit("약탈자 무리에 휩쓸렸다!", Color(0.78, 0.24, 0.16, 0.4), "grumble") if tr.march \
+					else take_hit("살수차 물벼락!", Color(0.44, 0.63, 0.78, 0.45), "spray")
+				if over_s:
 					return
 				break
 	# cars and bikes on the crossings
@@ -836,6 +1030,9 @@ func update(dt: float) -> void:
 	dogs = dogs.filter(func(d): return d.z > position_z + 100.0 and absf(d.x) < 2.6)
 	peers = peers.filter(func(s): return s.z > position_z + 100.0 and s.leave < 2.5)
 	birds = birds.filter(func(b): return b.x > -60.0 and b.x < W + 60.0)
+	trucks = trucks.filter(func(tr): return tr.z > position_z - SPRAY_LEN and tr.z < position_z + DRAW * SEG_LEN)
+	fires = fires.filter(func(f): return f.z > position_z + 100.0 and (f.kind == "bin" or f.life > 0.0))
+	wrecks = wrecks.filter(func(w): return w.z > position_z + 100.0)
 	texts = texts.filter(func(t): return t.life > 0.0)
 
 
@@ -899,9 +1096,14 @@ func fill(pts: PackedVector2Array, col: Color) -> void:
 	if c.a <= 0.003:
 		return
 	var base := _v.size()
-	for p in pts:
-		_v.append(p * t_s + t_o)
-		_c.append(c)
+	if t_r != 0.0:
+		for p in pts:
+			_v.append((p * t_s).rotated(t_r) + t_o)
+			_c.append(c)
+	else:
+		for p in pts:
+			_v.append(p * t_s + t_o)
+			_c.append(c)
 	for k in range(1, n - 1):
 		_i.append(base)
 		_i.append(base + k)
@@ -974,14 +1176,16 @@ func qcurve(p0: Vector2, c: Vector2, p1: Vector2, n := 10) -> PackedVector2Array
 	return out
 
 
-func xf(origin: Vector2, scale := Vector2.ONE) -> void:
+func xf(origin: Vector2, scale := Vector2.ONE, rot := 0.0) -> void:
 	t_o = origin
 	t_s = scale
+	t_r = rot
 
 
 func xf_reset() -> void:
 	t_o = Vector2.ZERO
 	t_s = Vector2.ONE
+	t_r = 0.0
 
 
 func text(s: String, pos: Vector2, size: int, col: Color, align := HORIZONTAL_ALIGNMENT_CENTER, f: Font = null, outline := 0, outline_col := Color.BLACK) -> void:
@@ -1091,7 +1295,26 @@ func _draw() -> void:
 		elif s.feature == "obelisk":
 			add.call(zc, draw_obelisk.bind(to_screen(zc, S * s.w * 3.2)))
 		if s.terrace and s.i % 2 == 0:
-			add.call(terrace_z(s), draw_terrace.bind(to_screen(terrace_z(s), terrace_x(s)), s.i, s.side))
+			add.call(terrace_z(s), (draw_looter_group if hard else draw_terrace).bind(to_screen(terrace_z(s), terrace_x(s)), s.i, s.side))
+	for tr in trucks:
+		if not tr.march:
+			add.call(tr.z, draw_cleaner.bind(tr))
+			continue
+		# the looters: a loose pack running along the curb, spilling into the road, filling the
+		# same stretch the cleaner's spray would (so it is dodged the same way)
+		for j in 11:
+			var zj: float = tr.z + (j - 5) * SPRAY_LEN * 0.17
+			var sg := seg_at(zj)
+			var xj: float = sg.side * (-sg.w + maxf(0.05, wet_reach(tr, zj)) * (0.25 + 0.6 * seat_rand(tr.seed, j)) - (0.35 if j % 3 == 0 else 0.0))
+			var o := {"throwing": 1.0 - tr.throw_t / 0.5} if tr.throw_t > 0.0 and tr.throw_j == j else {}
+			add.call(zj, draw_looter.bind(to_screen(zj, xj), tr.seed + j * 7.1, tr.t, false, o))
+	for f in fires:
+		add.call(f.z, draw_fire.bind(to_screen(f.z, f.x), f))
+	for w in wrecks:
+		var sg := seg_at(w.z)
+		add.call(w.z, draw_wreck.bind(to_screen(w.z, -sg.side * sg.w * WRECK_LANE), w))
+	for m in molotovs:
+		add.call(m.z, draw_target.bind(to_screen(m.z, m.x), {"t": m.t, "T": m.T, "r": 0.3}))
 	for st in stains:
 		add.call(st.z, draw_stain.bind(to_screen(st.z, st.x), st.seed))
 	for p in poops:
@@ -1129,6 +1352,8 @@ func _draw() -> void:
 		ell(fx, fy, 3 + k * 3, 4.5 + k * 4, Color("f4f2ea"))
 	for b in birds:
 		draw_bird(b)
+	for m in molotovs:
+		draw_molotov(m)
 
 	for t in texts:
 		var tx := player_screen.x
@@ -1221,6 +1446,18 @@ func draw_segment(row: Dictionary) -> void:
 	quad(Color("6f8aa3"), 0, 1, -1.1, -1.06)                                 # gutter water
 	quad(Color("9d968b"), 0, 1, -1.06, -1)                                   # curb
 	quad(Color("cfc6b8") if floori(i / 2.0) % 2 else Color("c5bbac"), 0, 1, -1, 1)   # sidewalk slabs
+	# wet patch along the curb where a street cleaner is spraying: a ragged, tapering inner edge
+	# (sampled 6× per segment) with a lighter sheen inside
+	for tr in trucks:
+		if tr.march or row.zs + SEG_LEN < tr.z - SPRAY_LEN or row.zs > tr.z + SPRAY_LEN:
+			continue
+		for j in 6:
+			var f0 := j / 6.0
+			var f1 := (j + 1) / 6.0
+			var e0: float = wet_reach(tr, row.zs + f0 * SEG_LEN) / seg.w
+			var e1: float = wet_reach(tr, row.zs + f1 * SEG_LEN) / seg.w
+			fill(PackedVector2Array([P(f0, -1.1), P(f1, -1.1), P(f1, -1.1 + maxf(0, e1 + 0.1)), P(f0, -1.1 + maxf(0, e0 + 0.1))]), Color(0.24, 0.35, 0.45, 0.36))
+			fill(PackedVector2Array([P(f0, -1.1), P(f1, -1.1), P(f1, -1 + e1 * 0.45), P(f0, -1 + e0 * 0.45)]), Color(0.8, 0.87, 0.93, 0.16))
 	if detail:
 		quad(Color(0.47, 0.42, 0.36, 0.35), 0, 1, -0.34, -0.33)
 		quad(Color(0.47, 0.42, 0.36, 0.35), 0, 1, 0.33, 0.34)
@@ -1268,6 +1505,8 @@ func draw_segment(row: Dictionary) -> void:
 			Color("e9dfc9") if i % 2 else Color("9b2f2b"))
 	if i % 7 == 3:
 		fill(PackedVector2Array([P(0.3, 1.1, ROOF_H - 50), P(0.7, 1.1, ROOF_H - 50), P(0.7, 1.1, ROOF_H + 260), P(0.3, 1.1, ROOF_H + 260)]), Color("8a6a55"))
+	if hard and detail:
+		draw_damage(seg)
 	# first building of a block: its corner face looks back at us, so give it a proper front
 	if i > 0:
 		var prev: Dictionary = segs[i - 1]
@@ -1765,6 +2004,365 @@ func draw_bird(b: Dictionary) -> void:
 	xf_reset()
 
 
+# ---------- hard mode: fire, Molotovs, burning cars, damaged buildings, looters ----------
+
+## one licking flame: a teardrop that sways, orange outside and yellow inside
+func flame(x: float, y: float, w: float, h: float, ph: float) -> void:
+	var sway := sin(ph) * w * 0.35
+	var hh := h * (0.85 + 0.15 * sin(ph * 1.7))
+	var outer := qcurve(V(x - w / 2, y), V(x - w * 0.55, y - hh * 0.55), V(x + sway, y - hh), 6)
+	outer.append_array(qcurve(V(x + sway, y - hh), V(x + w * 0.55, y - hh * 0.55), V(x + w / 2, y), 6))
+	fill(outer, Color(0.93, 0.41, 0.13, 0.9))
+	var inner := qcurve(V(x - w * 0.25, y), V(x - w * 0.28, y - hh * 0.35), V(x + sway * 0.6, y - hh * 0.6), 5)
+	inner.append_array(qcurve(V(x + sway * 0.6, y - hh * 0.6), V(x + w * 0.28, y - hh * 0.35), V(x + w * 0.25, y), 5))
+	fill(inner, Color(1.0, 0.84, 0.35, 0.95))
+
+
+## burning car parked by the curb, seen from behind: scorched paint, blown-out rear window,
+## flames pouring out of the cabin and a thick column of black smoke
+func draw_wreck(p: Dictionary, w: Dictionary) -> void:
+	if p.is_empty():
+		return
+	var k: float = p.k
+	var x: float = p.x
+	var y: float = p.y
+	var t: float = w.t
+	var sd: float = w.seed
+	var hw := 230 * k
+	var H0 := 170 * k
+	var H1 := 380 * k
+	ell(x, y, 700 * k, 700 * k * p.flat, Color(1, 0.51, 0.16, 0.22))
+	for j in 6:      # black smoke billowing up and leaning away
+		var u := fposmod(t * 0.25 + j / 6.0, 1.0)
+		circ(x + sin(u * 2.5 + sd) * 160 * k + u * 380 * k, y - (450 + u * 2600) * k, (200 + u * 520) * k, Color(0.14, 0.13, 0.13, 0.55 * (1 - u)))
+	ell(x, y, hw * 1.1, hw * 1.1 * p.flat * 0.6, Color(0, 0, 0, 0.3))
+	rect(x - hw * 0.95, y - 90 * k, hw * 0.32, 90 * k, Color("141414"))      # tyres
+	rect(x + hw * 0.63, y - 90 * k, hw * 0.32, 90 * k, Color("141414"))
+	rect(x - hw, y - H0 - 40 * k, hw * 2, H0 - 30 * k, w.color)             # what's left of the paint
+	rect(x - hw, y - H0 - 40 * k, hw * 2, (H0 - 30 * k) * 0.6, Color(0.12, 0.1, 0.09, 0.75))
+	fill(PackedVector2Array([V(x - hw * 0.92, y - H0 - 40 * k), V(x - hw * 0.7, y - H1), V(x + hw * 0.7, y - H1), V(x + hw * 0.92, y - H0 - 40 * k)]), Color("2a2523"))
+	fill(PackedVector2Array([V(x - hw * 0.78, y - H0 - 55 * k), V(x - hw * 0.62, y - H1 + 20 * k), V(x + hw * 0.62, y - H1 + 20 * k), V(x + hw * 0.78, y - H0 - 55 * k)]), Color(1, 0.59, 0.2, 0.85))
+	rect(x - hw * 0.95, y - H0 - 20 * k, hw * 0.2, 30 * k, Color("7a1a14"))  # dead tail lights
+	rect(x + hw * 0.75, y - H0 - 20 * k, hw * 0.2, 30 * k, Color("7a1a14"))
+	for j in 6:
+		flame(x + (j - 2.5) * hw * 0.3, y - H1 + 30 * k, 130 * k, (420 + 160 * sin(j * 1.7 + sd)) * k, t * 8 + j * 1.4 + sd)
+	flame(x + hw * 0.55, y - H0, 110 * k, 260 * k, t * 11 + sd)
+
+
+## burning bin (the green Paris litter bin) or heap of rubbish, or a patch of fire left by a Molotov
+func draw_fire(p: Dictionary, f: Dictionary) -> void:
+	if p.is_empty():
+		return
+	var k: float = p.k
+	var x: float = p.x
+	var y: float = p.y
+	var t: float = f.t
+	var sd: float = f.seed
+	if f.kind == "bin":
+		ell(x, y, 420 * k, 420 * k * p.flat, Color(1, 0.55, 0.16, 0.22))   # glow on the pavement
+		for j in 4:      # smoke rising and drifting
+			var u := fposmod(t * 0.35 + j / 4.0, 1.0)
+			circ(x + sin(u * 3 + sd) * 120 * k + u * 160 * k, y - (700 + u * 1500) * k, (130 + u * 260) * k, Color(0.27, 0.26, 0.26, 0.45 * (1 - u)))
+		if f.pile:       # a heap of bags and boxes
+			var blob := func(dx: float, dy: float, rx: float, ry: float, c: Color) -> void:
+				ell(x + dx * k, y + dy * k, rx * k, ry * k, c)
+			blob.call(-120, -80, 140, 95, Color("1e2522"))
+			blob.call(115, -75, 130, 90, Color("2f5d46"))
+			blob.call(0, -60, 150, 80, Color("2a2c30"))
+			xf(V(x - 40 * k, y - 190 * k), Vector2.ONE, -0.35 + 0.2 * sin(sd))
+			rect(-90 * k, -70 * k, 180 * k, 140 * k, Color("b48a5a"))
+			rect(-90 * k, -10 * k, 180 * k, 14 * k, Color("8a6a48"))
+			xf_reset()
+			blob.call(80, -200, 110, 85, Color("3a4440"))
+			blob.call(-10, -280, 90, 70, Color("1e2522"))
+			rect(x + 130 * k, y - 40 * k, 70 * k, 30 * k, Color("d9d0c0"))      # spilled litter
+			rect(x - 230 * k, y - 25 * k, 50 * k, 20 * k, Color("d9d0c0"))
+			for j in 5:
+				flame(x + (j - 2) * 75 * k, y - (200 + 90 * cos(j)) * k, 140 * k, (330 + 120 * sin(j * 2.1 + sd)) * k, t * 9 + j * 1.3 + sd)
+			return
+		rect(x - 130 * k, y - 430 * k, 260 * k, 430 * k, Color("2f5d46"))   # the bin
+		rect(x - 140 * k, y - 450 * k, 280 * k, 40 * k, Color("1f3f30"))
+		rect(x - 20 * k, y - 430 * k, 40 * k, 430 * k, Color("4a4a4a"))
+		for j in 5:
+			flame(x + (j - 2) * 60 * k, y - 440 * k, 150 * k, (380 + 120 * sin(j * 2.1 + sd)) * k, t * 9 + j * 1.3 + sd)
+		return
+	var sc := fire_scale(f)
+	if sc <= 0.0:
+		return
+	var R: float = f.r * ROAD_W * k * sc
+	ell(x, y, R * 1.05, R * 1.05 * p.flat, Color(0.16, 0.12, 0.1, 0.5))    # scorched pavement
+	ell(x, y, R * 1.3, R * 1.3 * p.flat, Color(1, 0.55, 0.16, 0.3))
+	for j in 7:      # flames standing on the patch, back row first
+		var a := PI * (j / 6.0)
+		flame(x + cos(a + sd) * R * 0.75, y - absf(sin(a)) * R * p.flat * 0.6, 110 * k * sc, (220 + 90 * sin(j * 1.9 + sd)) * k * sc, t * 10 + j * 1.7)
+	flame(x, y + R * p.flat * 0.3, 140 * k * sc, 300 * k * sc, t * 8 + sd)
+
+
+## the bottle in flight: arcs over from the street side, tumbling, its rag alight
+func draw_molotov(m: Dictionary) -> void:
+	var tgt := to_screen(m.z, m.x)
+	if tgt.is_empty():
+		return
+	var k := minf(m.t / m.T, 1.0)
+	var x: float = m.sx + (tgt.x - m.sx) * k
+	var y: float = m.sy + (tgt.y - m.sy) * k - sin(PI * k) * H * 0.32
+	var s := maxf(0.8, H / 600.0) * (0.8 + k * 0.6)
+	xf(V(x, y), V(s, s), m.spin + m.t * 9)
+	rect(-4, -6, 8, 14, Color(0.47, 0.59, 0.35, 0.9))
+	rect(-2, -11, 4, 6, Color(0.35, 0.47, 0.27, 0.95))
+	rect(-1.5, -15, 3, 5, Color("e8dcc6"))
+	xf_reset()
+	flame(x, y - 12 * s, 10 * s, (16 + sin(m.t * 30) * 4) * s, m.t * 20)
+
+
+## now and then a building has been set on fire (soot, gutted windows glowing, flames out of
+## the shop) or looted (smashed shopfront, boards, glass on the pavement, graffiti). Decided per
+## building, so the whole frontage of one building shares its fate.
+func building_damage(bld: int) -> String:
+	var v := sin(bld * 91.7 + 7.3) * 43758.5453
+	var f := v - floorf(v)
+	return "burnt" if f < 0.09 else ("looted" if f < 0.22 else "")
+
+
+func draw_damage(seg: Dictionary) -> void:
+	var dmg := building_damage(seg.bld)
+	if dmg == "":
+		return
+	var t := run_time
+	var i: int = seg.i
+	var kk := _as * K2
+	if dmg == "burnt":
+		wallq(Color(0.12, 0.09, 0.08, 0.45), 0, 1, 1.04, 0, WALL_H)            # soot all over
+		for fh in [1150.0, 1650.0, 2150.0]:
+			wallq(Color("16110e"), 0.3, 0.7, 1.04, fh, fh + 360)              # gutted windows
+			if fposmod(i + fh / 500.0, 2.0) < 1.0:
+				wallq(Color(1, (120 + floorf(40 * sin(t * 6 + i))) / 255.0, 0.16, 0.75), 0.36, 0.64, 1.04, fh + 60, fh + 300)
+			wallq(Color(0.04, 0.03, 0.03, 0.55), 0.25, 0.75, 1.04, fh + 360, fh + 520)   # black tongues above them
+		if kk > 0.01:
+			for fh in [1150.0, 1650.0, 2150.0]:      # fire licking out of the windows, all the way up
+				if fposmod(i * 7 + fh / 250.0, 3.0) >= 2.0:
+					continue
+				var wp := P(0.5, 1.04, fh + 330)
+				for j in 2:
+					flame(wp.x + (j - 0.5) * 90 * kk, wp.y, 170 * kk, (380 + 120 * sin(t * 3 + i + fh + j)) * kk, t * 9 + j * 2.3 + i + fh * 0.01)
+			if i % 2 == 0:                           # and through the roof
+				var rp := P(0.5, 1.1, ROOF_H)
+				for j in 3:
+					flame(rp.x + (j - 1) * 120 * kk, rp.y, 200 * kk, (520 + 160 * sin(j * 1.7 + i)) * kk, t * 7 + j * 1.6 + i)
+		wallq(Color("16110e"), 0.12, 0.88, 1.04, 60, 640)
+		if kk > 0.01:
+			var fp := P(0.5, 1.04, 60)
+			for j in 3:
+				flame(fp.x + (j - 1) * 130 * kk, fp.y, 220 * kk, (520 + 140 * sin(j * 2 + i)) * kk, t * 8 + j * 1.9 + i)
+			var sp := P(0.5, 1.13, ROOF_H)
+			for j in 3:                              # smoke pouring off the roof
+				var u := fposmod(t * 0.2 + j / 3.0 + i * 0.13, 1.0)
+				circ(sp.x + u * 500 * kk, sp.y - u * 1600 * kk, (250 + u * 500) * kk, Color(0.16, 0.14, 0.14, 0.5 * (1 - u)))
+		return
+	# looted
+	if seg.shop:
+		wallq(Color("1c1f24"), 0.12, 0.88, 1.04, 60, 640)                      # dark, emptied shop
+		for pts in [[[0.12, 640.0], [0.3, 420.0], [0.22, 200.0], [0.12, 60.0]], [[0.88, 640.0], [0.7, 480.0], [0.8, 260.0], [0.66, 60.0]]]:
+			var line_pts := []
+			for q in pts:
+				line_pts.append(P(q[0], 1.04, q[1]))
+			polyline(line_pts, maxf(1, 12 * kk), Color(0.92, 0.94, 0.96, 0.75))   # what's left of the glass
+		if i % 2:      # boarded up
+			wallq(Color("b08a5a"), 0.14, 0.5, 1.04, 80, 620)
+			wallq(Color(0.31, 0.24, 0.16, 0.4), 0.14, 0.5, 1.04, 330, 350)
+		wallq(Color(0.78, 0.78, 0.78, 0.35), 0, 1, 1.04, 680, 860)               # shop sign smashed
+	# graffiti scrawled along the stone, and broken glass on the pavement below
+	var graff := [[[Color("c8372d"), Color("1d3b6e"), Color("1b1e24")][seg.bld % 3], 740.0, 0.0]]
+	if i % 3 == 0:
+		graff.append([Color("2f5d46"), 930.0, 2.1])
+	for g in graff:
+		var gp := []
+		for j in 11:
+			gp.append(P(j / 10.0, 1.04, g[1] + 70 * sin(i * 1.7 + j * 1.3 + g[2]) + 40 * sin(j * 3.1)))
+		polyline(gp, maxf(1, 15 * kk), g[0])
+	for j in 4:
+		var gl := P((j + 0.3) / 4.0, 0.86 + 0.1 * absf(sin(i * 3 + j)))
+		rect(gl.x, gl.y - 30 * kk, maxf(1, 40 * kk), maxf(1, 14 * kk), Color(0.88, 0.92, 0.94, 0.8))
+
+
+## a looter: dark hoodie with the hood up, face covered, making off with something: a boxed TV,
+## bulging shopping bags, a stack of shoe boxes, or a crowbar. Seen from behind (running up the
+## street with the gang) or from the front (carrying the goods out of a shop by the wall).
+## o.walk: walking; o.carry == false: empty-handed; o.smash: swinging a crowbar at the window;
+## o.throwing: 0…1 through a throw; o.flip: mirrored; o.alpha: fading in or out
+func draw_looter(p: Dictionary, sd: float, t: float, front: bool, o := {}) -> void:
+	if p.is_empty():
+		return
+	var Hh: float = 560 * p.k * (0.9 + 0.2 * seat_rand(sd, 1))
+	var coat: Color = C_LOOTER_COATS[int(seat_rand(sd, 2) * C_LOOTER_COATS.size())]
+	var walk: bool = o.get("walk", false)
+	var prop := seat_rand(sd, 4)                    # someone hauling loot holds loot
+	if o.get("smash", false) or o.has("throwing"):
+		prop = 1.0
+	elif o.get("carry", true) == false:
+		prop = -1.0
+	elif walk:
+		prop *= 0.8
+	var run: float
+	var bob: float
+	if walk:
+		run = sin(t * 9 + sd) * Hh * 0.045
+		bob = absf(sin(t * 9 + sd)) * Hh * 0.015
+	elif front:
+		run = sin(t * 3 + sd) * Hh * 0.015
+		bob = 0.0
+	else:
+		run = sin(t * 11 + sd) * Hh * 0.06
+		bob = absf(sin(t * 11 + sd)) * Hh * 0.03
+	xf(V(p.x, p.y), V(-1 if o.get("flip", false) else 1, 1))
+	if o.has("alpha"):
+		ga = clampf(o.alpha, 0.0, 1.0)
+	ell(0, 0, Hh * 0.2, Hh * 0.2 * p.flat, Color(0, 0, 0, 0.2))
+	t_o.y -= bob
+	rect(-Hh * 0.08, -Hh * 0.42 + run, Hh * 0.07, Hh * 0.42 - run, Color("202328"))   # legs
+	rect(Hh * 0.01, -Hh * 0.42 - run, Hh * 0.07, Hh * 0.42 + run, Color("202328"))
+	rect(-Hh * 0.09, -Hh * 0.03 + minf(0, run), Hh * 0.09, Hh * 0.03, Color("e8e4d8"))   # white trainers
+	rect(0, -Hh * 0.03 + minf(0, -run), Hh * 0.09, Hh * 0.03, Color("e8e4d8"))
+	fill(PackedVector2Array([V(-Hh * 0.15, -Hh * 0.8), V(Hh * 0.15, -Hh * 0.8), V(Hh * 0.16, -Hh * 0.38), V(-Hh * 0.16, -Hh * 0.38)]), coat)   # hoodie
+	circ(0, -Hh * 0.9, Hh * 0.085, Color("c99a74") if front else coat)       # hood up; from the front, a masked face
+	ell(0, -Hh * 0.92, Hh * 0.095, Hh * 0.095, coat, 0, PI * 0.95, PI * 2.05)
+	if front:
+		rect(-Hh * 0.07, -Hh * 0.9, Hh * 0.14, Hh * 0.07, Color("111111"))        # mask over nose and mouth
+		rect(-Hh * 0.045, -Hh * 0.935, Hh * 0.025, Hh * 0.012, Color("e8e4d8"))
+		rect(Hh * 0.02, -Hh * 0.935, Hh * 0.025, Hh * 0.012, Color("e8e4d8"))
+	var aw := Hh * 0.06
+	if prop < 0:                                       # empty-handed, arms swinging
+		for s in [-1.0, 1.0]:
+			line(V(s * Hh * 0.16, -Hh * 0.76), V(s * Hh * 0.19, -Hh * 0.48 + s * run * 0.8), aw, coat)
+	elif o.has("throwing"):                            # arm flung up and out, toward the walker
+		var u: float = o.throwing
+		line(V(Hh * 0.15, -Hh * 0.76), V(Hh * 0.2, -Hh * 0.48), aw, coat)
+		line(V(-Hh * 0.13, -Hh * 0.76), V(-Hh * (0.2 + 0.12 * u), -Hh * (1.15 - 0.25 * u)), aw, coat)
+	elif o.get("smash", false):                        # wind up slowly, strike hard, rest
+		var s := fposmod(t * 1.4 + sd, 1.0)
+		var a := 0.5
+		if s < 0.65:
+			a = -0.5 - 1.9 * (s / 0.65)
+		elif s < 0.75:
+			a = -2.4 + 2.9 * ((s - 0.65) / 0.1)
+		var sh := V(Hh * 0.13, -Hh * 0.76)
+		var hand := sh + V(cos(a), sin(a)) * Hh * 0.24
+		line(V(-Hh * 0.15, -Hh * 0.76), V(-Hh * 0.2, -Hh * 0.48), aw, coat)
+		line(sh, hand, aw, coat)
+		var tip := hand + V(cos(a), sin(a)) * Hh * 0.3
+		line(hand, tip, maxf(1, Hh * 0.025), Color("8c2a2a"))
+		if s > 0.73 and s < 0.85:                      # glass flying off the window
+			for j in 6:
+				var ang := j * 1.1 + sd
+				var d := (s - 0.73) * Hh * 2.2
+				rect(tip.x + cos(ang) * d, tip.y + sin(ang) * d * 0.6 - d * 0.3, Hh * 0.03, Hh * 0.02, Color(0.92, 0.96, 0.98, 0.9))
+	elif prop < 0.35:                                  # a boxed flat-screen TV, hugged in both arms
+		var bw := Hh * 0.46
+		var bh := Hh * 0.3
+		var by := -Hh * 0.74
+		rect(-bw / 2, by, bw, bh, Color("c8a170"))
+		rect(-bw * 0.36, by + bh * 0.2, bw * 0.72, bh * 0.55, Color("b08a5a"))
+		rect(-bw * 0.3, by + bh * 0.08, bw * 0.24, bh * 0.1, Color("1d3b6e"))
+		for s in [-1.0, 1.0]:
+			line(V(s * Hh * 0.15, -Hh * 0.76), V(s * bw * 0.5, by + bh * 0.6), aw, coat)
+	elif prop < 0.6:                                   # bulging shopping bags, one in each hand
+		for s in [-1.0, 1.0]:
+			line(V(s * Hh * 0.16, -Hh * 0.76), V(s * Hh * 0.22, -Hh * 0.5 + s * run * 0.5), aw, coat)
+			rect(s * Hh * 0.22 - Hh * 0.08, -Hh * 0.5 + s * run * 0.5, Hh * 0.16, Hh * 0.2, Color("e8e4d8") if s < 0 else Color("c8372d"))
+	elif prop < 0.8:                                   # a stack of shoe boxes
+		for j in 3:
+			rect(-Hh * 0.16 + j * Hh * 0.01, -Hh * (0.62 + j * 0.09), Hh * 0.3, Hh * 0.085, [Color("e8742b"), Color("f2f2f2"), Color("1b1e24")][j])
+		for s in [-1.0, 1.0]:
+			line(V(s * Hh * 0.15, -Hh * 0.76), V(s * Hh * 0.17, -Hh * 0.58), aw, coat)
+	else:                                              # a crowbar, brandished
+		line(V(-Hh * 0.15, -Hh * 0.76), V(-Hh * 0.2, -Hh * 0.48), aw, coat)
+		line(V(Hh * 0.13, -Hh * 0.76), V(Hh * 0.2, -Hh * 0.98), aw, coat)
+		polyline([V(Hh * 0.2, -Hh * 0.98), V(Hh * 0.32, -Hh * 1.26), V(Hh * 0.27, -Hh * 1.3)], maxf(1, Hh * 0.025), Color("8c2a2a"))
+	ga = 1.0
+	xf_reset()
+
+
+## hard mode: where the café tables would be, a gang looting the shop by the wall. One keeps
+## smashing at the window with a crowbar; the other two go in empty-handed (fading into the shop)
+## and come back out towards the street carrying a TV, bags or shoe boxes.
+func draw_looter_group(p: Dictionary, seg_i: int, S: int) -> void:
+	if p.is_empty():
+		return
+	var cw: float = 0.12 * ROAD_W * p.k
+	var t := run_time
+	var thrown: float = t - segs[seg_i].get("throw_at", -99.0)      # just threw a Molotov at the walker?
+	var q := p.duplicate()
+	q.x = p.x + S * cw * 1.1
+	q.y = p.y - 6 * p.k
+	if thrown < 0.6:
+		draw_looter(q, seg_i * 3.7, t, true, {"throwing": thrown / 0.6, "flip": S < 0})
+	else:
+		draw_looter(q, seg_i * 3.7, t, false, {"smash": true, "flip": S < 0})
+	for j in [1, 2]:
+		var ph := fposmod(t / 3.4 + j * 0.5 + seg_i * 0.13, 1.0)
+		var sd: float = seg_i * 3.7 + j
+		var r := p.duplicate()
+		if ph < 0.42:
+			var u := ph / 0.42
+			r.x = p.x + S * cw * (-1 + 2.3 * u)
+			draw_looter(r, sd, t, false, {"walk": true, "carry": false, "alpha": 1 - maxf(0, (u - 0.75) / 0.25)})
+		elif ph >= 0.58:
+			var u := (ph - 0.58) / 0.42
+			r.x = p.x + S * cw * (1.3 - 2.3 * u)
+			draw_looter(r, sd, t, true, {"walk": true, "alpha": u / 0.2})
+
+
+## green Paris street-cleaning truck seen from behind, hosing the sidewalk edge
+func draw_cleaner(tr: Dictionary) -> void:
+	var seg := seg_at(tr.z)
+	var S: float = seg.side
+	var p := to_screen(tr.z, -1.75 * S)
+	if p.is_empty():
+		return
+	var k: float = p.k
+	var x: float = p.x
+	var y: float = p.y
+	var w := 0.85 * ROAD_W * k
+	var h := 1050 * k
+	ell(x, y, w * 0.6, w * 0.6 * p.flat, Color(0, 0, 0, 0.25))
+	rect(x - w * 0.45, y - 160 * k, w * 0.18, 160 * k, Color("1b1e24"))
+	rect(x + w * 0.27, y - 160 * k, w * 0.18, 160 * k, Color("1b1e24"))
+	rect(x - w / 2, y - h, w, h - 130 * k, Color("2e7d4f"))
+	ell(x, y - h * 0.62, w * 0.36, h * 0.3, Color("3c9a63"))
+	rect(x - w * 0.42, y - h * 0.25, w * 0.84, h * 0.08, Color("e9eef5"))
+	rect(x - w * 0.46, y - h * 0.22, w * 0.08, h * 0.06, Color("c8372d"))
+	rect(x + w * 0.38, y - h * 0.22, w * 0.08, h * 0.06, Color("c8372d"))
+	ell(x, y - h - 20 * k, 40 * k, 40 * k, Color("f2a33a"), 0, PI, TAU)
+	if w > 40:
+		text("PROPRETÉ DE PARIS", V(x, y - h * 0.185), int(maxf(6, w * 0.09)), Color("1d3b6e"), HORIZONTAL_ALIGNMENT_CENTER, mono)
+	# water fans out from a side nozzle as streams of droplets, with a misty splash where they land
+	var sx := x + S * w * 0.5
+	var sy := y - 330 * k
+	rect(sx - 10 * k - (50 * k if S < 0 else 0.0), sy - 25 * k, 70 * k, 50 * k, Color(0.63, 0.73, 0.8, 0.9))
+	for j in 5:
+		var zj: float = tr.z + (j - 2) * SPRAY_LEN * 0.35
+		var g := to_screen(zj, S * (-seg.w + wet_reach(tr, zj) * 0.7 + sin(tr.t * 9 + j) * 0.04))
+		if g.is_empty():
+			continue
+		var c := V((sx + g.x) / 2, minf(sy, g.y) - 90 * k)
+		var a := V(sx, sy)
+		var e := V(g.x, g.y)
+		var core := []
+		for n in 7:
+			var u := 0.05 * n
+			core.append(a.lerp(c, u).lerp(c.lerp(e, u), u))
+		polyline(core, maxf(1, 14 * k), Color(0.84, 0.91, 0.96, 0.7))
+		for n in 12:
+			var u := fposmod(n / 12.0 + tr.t * 1.6, 1.0)
+			if u < 0.25:
+				continue
+			var pt := a.lerp(c, u).lerp(c.lerp(e, u), u)
+			var spread := u * 40 * k
+			circ(pt.x + sin(n * 12.9 + j * 3.1) * spread, pt.y + cos(n * 7.3 + j) * spread * 0.6, maxf(0.8, (10 + u * 12) * k), Color(0.86, 0.93, 0.97, 0.85 - u * 0.4))
+		var r := maxf(2, 90 * g.k)
+		ell(g.x, g.y - r * 0.3, r, r * 0.55, Color(0.88, 0.93, 0.97, 0.35))
+
+
 # ---------- the walker, seen from behind ----------
 
 func draw_player() -> void:
@@ -2001,7 +2599,7 @@ func _overlay(root: Control, title: String, paras: Array, button: String) -> Con
 	box.add_child(t)
 	for s in paras:
 		box.add_child(_para(s))
-	# 일반 / 어려움 — hard mode only changes the look and keeps its own best score for now
+	# 일반 / 어려움 — hard mode is a riot: fire, Molotovs and looters, with its own best score
 	var diff := HBoxContainer.new()
 	diff.alignment = BoxContainer.ALIGNMENT_CENTER
 	diff.add_theme_constant_override("separation", 8)
@@ -2019,7 +2617,7 @@ func _overlay(root: Control, title: String, paras: Array, button: String) -> Con
 		diff_buttons.append(b)
 		diff.add_child(b)
 	box.add_child(diff)
-	var note := _para("폭동이 번진 날의 파리. (프로토타입: 불길·화염병·약탈자는 아직 없어요 — 지금은 하늘빛과 최고 점수만 따로예요.)")
+	var note := _para("폭동이 번진 날의 파리. 불길과 화염병, 약탈자까지 피해야 해요. 최고 점수도 따로예요.")
 	note.add_theme_font_size_override("font_size", 13)
 	note.modulate = Color(1, 0.75, 0.65)
 	hard_notes.append(note)
