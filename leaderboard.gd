@@ -25,6 +25,7 @@ var after_profile := Callable()
 var picked_avatar := ""
 var board_mode := "normal"
 var board_period := "all"
+var cache := {}              # "normal|all" etc. -> the leaderboard RPC's last answer
 
 # UI
 var hidden_panel: Control
@@ -74,6 +75,7 @@ func setup(g: Node, root: Control, start_box: VBoxContainer, over_box: VBoxConta
 	over_box.add_child(orow)
 	_build_board(root)
 	_build_profile(root)
+	prefetch()
 
 
 func is_open() -> bool:
@@ -201,6 +203,7 @@ func submit_pending() -> void:
 		over_action.visible = true
 		return
 	pending_run = {}
+	prefetch([run.mode])      # the boards this run changed, ready for 순위 보기
 	var a = r.data.get("all", {}).get("me")
 	var w = r.data.get("week", {}).get("me")
 	over_status.text = ("어려움 · " if run.mode == "hard" else "") + "전체 %s위 · 이번 주 %s위" % [
@@ -216,23 +219,46 @@ func open_board() -> void:
 	load_board()
 
 
+## Boards are cached per difficulty × period: all four are fetched once at start-up, and the
+## played difficulty again right after a run is posted. Opening a board shows the cached copy
+## at once and refreshes it in the background.
+func prefetch(modes := ["normal", "hard"]) -> void:
+	for m in modes:
+		for p in ["all", "week"]:
+			fetch_board(m, p)
+
+
+func fetch_board(m: String, p: String) -> Dictionary:
+	var body := {"p_period": p, "p_player": profile.get("id", null)}
+	if m == "hard":
+		body["p_mode"] = "hard"
+	var r := await call_api("leaderboard", body)
+	if r.ok:
+		cache[m + "|" + p] = r.data
+	if board.visible and m == board_mode and p == board_period:      # still the board on screen
+		if r.ok:
+			_render_board(r.data)
+		elif not cache.has(m + "|" + p):
+			board_me.text = err_text(r.error)
+	return r
+
+
 func load_board() -> void:
 	for k in tabs:
 		tabs[k].button_pressed = k == board_mode or k == board_period
+	var key := board_mode + "|" + board_period
+	if cache.has(key):
+		_render_board(cache[key])
+	else:
+		for c in board_list.get_children():
+			c.queue_free()
+		board_me.text = "불러오는 중…"
+	fetch_board(board_mode, board_period)
+
+
+func _render_board(data: Dictionary) -> void:
 	for c in board_list.get_children():
 		c.queue_free()
-	board_me.text = "불러오는 중…"
-	var body := {"p_period": board_period, "p_player": profile.get("id", null)}
-	if board_mode == "hard":
-		body["p_mode"] = "hard"
-	var asked := [board_mode, board_period]
-	var r := await call_api("leaderboard", body)
-	if asked != [board_mode, board_period] or not board.visible:
-		return      # the tabs changed while this was loading
-	if not r.ok:
-		board_me.text = err_text(r.error)
-		return
-	var data: Dictionary = r.data
 	var top: Array = data.get("top", [])
 	if top.is_empty():
 		board_list.add_child(_label("이번 주 기록이 아직 없어요. 첫 주인공이 되어 보세요!" if board_period == "week" else "아직 기록이 없어요.", 14))
@@ -350,6 +376,7 @@ func save_profile(_t := "") -> void:
 		if not r.ok:
 			prof_status.text = err_text(r.error)
 			return
+		prefetch()      # the new nickname / emoji shows on the cached boards too
 	var next := after_profile
 	after_profile = Callable()
 	close_panels()
