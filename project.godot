@@ -18,7 +18,7 @@ window/stretch/aspect="expand"
 
 [gui]
 
-theme/custom_font="res://fonts/korean.tres"
+theme/custom_font="res://fonts/NanumSquareRoundR.ttf"
 
 [rendering]
 

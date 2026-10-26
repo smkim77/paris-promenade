@@ -50,14 +50,18 @@ var C_CARS := [Color("c8372d"), Color("e8e4d8"), Color("2f5d46"), Color("1d3b6e"
 var C_BIKES := [Color("8fc4a4"), Color("3f6fb0"), Color("c8372d"), Color("2a2c30"), Color("d9a441")]
 var C_COATS := [Color("2f5d46"), Color("1d3b6e"), Color("8c2a2a"), Color("d9a441"), Color("4a4f57"), Color("e8e4d8"), Color("7a5a8c")]
 var C_HEADS := ["3a2a1e", "1b1e24", "c9a066", "7a4a2a", "helmet", "beret"]
+var C_SITTER_COATS := [Color("4a5568"), Color("8c2a2a"), Color("2f5d46"), Color("c9a227"), Color("6b3a4a"), Color("1d3b6e")]
+var C_SITTER_HAIR := [Color("1b1e24"), Color("5b3a24"), Color("c9a26a"), Color("8a8a8a")]
 var C_DOGS := [Color("8a5a2b"), Color("e8dcc6"), Color("2b2b2b"), Color("b98a4e"), Color("d8d2c4"), Color("5b3a24")]
 var C_PEER_COATS := [Color("4a5568"), Color("5b4636"), Color("2f5d46"), Color("6b3a4a")]
 var C_LOOTER_COATS := [Color("1b1e24"), Color("2a2c30"), Color("33363d"), Color("3a3330"), Color("2b3340"), Color("4a4f57")]
 var ROOFS := []
 
-var font: Font = preload("res://fonts/korean.tres")
-var font_bold: SystemFont
-var mono: SystemFont
+# bundled Nanum Square Round (SIL Open Font License, see fonts/README.md), so Korean text
+# also shows on web and mobile exports
+var font: Font = preload("res://fonts/NanumSquareRoundR.ttf")
+var font_bold: Font = preload("res://fonts/NanumSquareRoundB.ttf")
+var mono: Font = font_bold
 
 # ---------- screen ----------
 var W := 640.0
@@ -108,6 +112,8 @@ var birds: Array = []
 var drops: Array = []
 var stains: Array = []
 var texts: Array = []
+var cyclists: Array = []      # bikes riding the street beside the sidewalk: scenery (and, in hard mode, throwers)
+var cyc_t := 0.0
 var trucks: Array = []         # street cleaners; in hard mode a gang of looters running up the street instead
 var fires: Array = []          # hard mode: burning bins / rubbish heaps, and patches of fire left by Molotovs
 var molotovs: Array = []
@@ -162,18 +168,13 @@ var hard_notes: Array = []
 var diff_buttons: Array = []
 var pause_btn: Button
 var sound_btn: Button
+var lb: Node                  # online scoreboard (leaderboard.gd)
 
 
 func _ready() -> void:
 	randomize()
 	for i in 48:
 		ROOFS.append({"w": 26 + ((i * 37) % 40), "h": 10 + ((i * 53) % 26), "chim": i % 3})
-	font_bold = SystemFont.new()
-	font_bold.font_names = (font as SystemFont).font_names
-	font_bold.font_weight = 800
-	mono = SystemFont.new()
-	mono.font_names = PackedStringArray(["Consolas", "Menlo", "DejaVu Sans Mono", "monospace"])
-	mono.font_weight = 600
 	_load_save()
 	_build_ui()
 	_set_mode(hard)
@@ -401,6 +402,8 @@ func reset() -> void:
 	stains = []
 	texts = []
 	trucks = []
+	cyclists = []
+	cyc_t = 0.0
 	fires = []
 	molotovs = []
 	wrecks = []
@@ -443,22 +446,20 @@ func start() -> void:
 	pause_btn.text = "II"
 	plate = {"text": PLACES[0].name, "ko": PLACES[0].ko, "life": 2.6}
 	sfx.play("start")
-	if hard:
-		sfx.music_play()       # hard mode: the riot piece (the normal-mode waltz isn't ported yet)
-	else:
-		sfx.music_stop()
+	sfx.music_play("riot" if hard else "waltz")      # hard mode: the riot piece; otherwise the Skaters' Waltz
+	sfx.ambience_start()
 
 
 func toggle_pause() -> void:
 	if state == PLAY:
 		state = PAUSED
 		drag = {}
-		sfx.music_pause(true)
+		sfx.quiet()
 		pause_btn.text = "▶"
 	elif state == PAUSED:
 		state = PLAY
 		pause_btn.text = "II"
-		sfx.music_pause(false)
+		sfx.music_resume()
 
 
 func game_over() -> void:
@@ -466,7 +467,7 @@ func game_over() -> void:
 	pause_btn.visible = false
 	flash = {}
 	shake = 0.0
-	sfx.music_stop()
+	sfx.quiet()
 	sfx.play("over")
 	var d := floori(dist)
 	var p: Dictionary = PLACES[place_at(dist)]
@@ -488,6 +489,7 @@ func game_over() -> void:
 	over_dist.text = "%d m 걸음 · %s 근처" % [d, p.ko]
 	over_msg.text = msg
 	over_panel.visible = true
+	lb.game_over({"score": sc, "dist": d, "place": place_at(dist), "duration": roundi(run_time * 1000.0), "mode": "hard" if hard else "normal"})
 
 
 func take_hit(label: String, color: Color, sound: String) -> bool:
@@ -591,7 +593,7 @@ func drop_from_bird(b: Dictionary) -> void:
 	var seg := seg_at(z)
 	var x := clampf(player_x + (randf() - 0.5) * 0.35, -seg.w + 0.12, seg.w - 0.12)
 	drops.append({"sx": b.x, "sy": b.y, "z": z, "x": x, "t": 0.0, "T": T, "r": 0.2})
-	sfx.play("drop")
+	sfx.play("drop", T)      # falling whistle: a heads-up that something is coming down
 
 
 ## irregular traffic: usually a long quiet gap, sometimes a car right behind another
@@ -647,6 +649,31 @@ func wet_reach(tr: Dictionary, z: float) -> float:
 	return SPRAY_REACH * taper * ragged
 
 
+## a cyclist on the street beside us: the near lane rides our way, the far lane comes toward us.
+## Riders vary: leisurely (the walker overtakes them), everyday, and the odd one in a hurry.
+func spawn_cyclist() -> void:
+	var toward := randf() < 0.4
+	var far := position_z + (DRAW - 6) * SEG_LEN
+	var r := randf()
+	var base := 900.0 + randf() * 1300.0
+	if r >= 0.8:
+		base = 3000.0 + randf() * 800.0
+	elif r >= 0.35:
+		base = 2000.0 + randf() * 1200.0
+	var v := -base * 0.75 if toward else base * 0.65
+	# faster than us: comes up from behind; slower: starts ahead, about 7 s of catching up away
+	var z := far
+	if not toward:
+		z = position_z - 300.0 if v > speed else position_z + maxf(6000.0, minf(far - position_z, (speed - v) * 7.0))
+	var seg := seg_at(z)
+	if seg.flip_x:
+		return
+	cyclists.append({"z": z, "v": v, "side": seg.side, "toward": toward, "throw_t": 0.0,
+		"lane": (2.15 if hard else 1.95) if toward else (1.75 if hard else 1.45),
+		"ph": randf() * 6.0, "color": C_BIKES.pick_random(), "coat": C_COATS.pick_random(),
+		"head": C_HEADS.pick_random(), "basket": randf() < 0.35})
+
+
 ## a car set alight in the parking lane, far up the street
 func spawn_wreck() -> void:
 	var z := position_z + DRAW * SEG_LEN * 0.85
@@ -676,6 +703,9 @@ func throw_molotov() -> void:
 	var sx := -20.0 if side > 0 else W + 20.0
 	var sy := H * (0.5 + randf() * 0.2)
 	var throwers := []
+	for c in cyclists:
+		if c.side == side and c.z - position_z > 900.0 and c.z - position_z < 7000.0:
+			throwers.append(c)
 	var pi_ := floori(position_z / SEG_LEN)
 	for i in range(pi_ + 4, mini(pi_ + 36, segs.size())):
 		var sg: Dictionary = segs[i]
@@ -688,7 +718,11 @@ func throw_molotov() -> void:
 	if throwers.size() and randf() < 0.8:
 		var th: Dictionary = throwers.pick_random()
 		var hand := {}
-		if th.has("march"):
+		if th.has("toward"):      # a cyclist
+			var sg := seg_at(th.z)
+			th.throw_t = 0.5
+			hand = to_screen(th.z, -th.side * sg.w * th.lane, 430)
+		elif th.has("march"):
 			var j := randi() % 11
 			var zj: float = th.z + (j - 5) * SPRAY_LEN * 0.17
 			var sg := seg_at(zj)
@@ -838,6 +872,14 @@ func update(dt: float) -> void:
 		c.cars = c.cars.filter(func(car): return absf(car.x) < 7.0)
 	crossings = crossings.filter(func(c): return c.z1 > position_z)
 
+	cyc_t -= dt
+	if cyc_t <= 0.0:
+		spawn_cyclist()
+		cyc_t = 1.2 + randf() * 3.5
+	for c in cyclists:
+		c.z += c.v * dt
+		c.ph += absf(c.v) * dt / 380.0
+		c.throw_t = maxf(0.0, c.throw_t - dt)
 	if dist > 80.0:
 		clean_t -= dt
 		if clean_t <= 0.0:
@@ -1030,10 +1072,71 @@ func update(dt: float) -> void:
 	dogs = dogs.filter(func(d): return d.z > position_z + 100.0 and absf(d.x) < 2.6)
 	peers = peers.filter(func(s): return s.z > position_z + 100.0 and s.leave < 2.5)
 	birds = birds.filter(func(b): return b.x > -60.0 and b.x < W + 60.0)
+	cyclists = cyclists.filter(func(c): return c.z > position_z - 400.0 and c.z < position_z + DRAW * SEG_LEN and seg_at(c.z).side == c.side)
 	trucks = trucks.filter(func(tr): return tr.z > position_z - SPRAY_LEN and tr.z < position_z + DRAW * SEG_LEN)
 	fires = fires.filter(func(f): return f.z > position_z + 100.0 and (f.kind == "bin" or f.life > 0.0))
 	wrecks = wrecks.filter(func(w): return w.z > position_z + 100.0)
 	texts = texts.filter(func(t): return t.life > 0.0)
+	update_ambience(p_z)
+
+
+## ambience volumes from what is near the walker (closer = louder, 0 when out of earshot)
+func near_v(d: float, reach_: float) -> float:
+	var v := 1.0 - absf(d) / reach_
+	return v * v if v > 0.0 else 0.0
+
+
+func update_ambience(p_z: float) -> void:
+	var spray := 0.0
+	var flies := 0.0
+	var car := 0.0
+	var car_pan := 0.0
+	var chatter := 0.0
+	for tr in trucks:
+		if tr.march:
+			chatter = maxf(chatter, near_v(tr.z - p_z, 5000.0))      # a gang is a crowd, not a hose
+		else:
+			spray = maxf(spray, near_v(tr.z - p_z, 4500.0))
+	# buzz only while a swarm is flying in, not for poop that already has its flies
+	for p in poops:
+		if p.flies <= 0.0 or p.flies >= 1.0 or p.z - p_z > 7000.0:
+			continue
+		flies = maxf(flies, sin(PI * p.flies) * near_v(Vector2(p.z - p_z, (p.x - player_x) * ROAD_W).length(), 7500.0))
+	for c in crossings:
+		for cr in c.cars:
+			if cr.bike:
+				continue
+			var dx: float = (cr.x - player_x) * ROAD_W
+			var v := near_v(Vector2(c.lanes[cr.lane] - p_z, dx).length(), 5000.0)
+			if v > car:
+				car = v
+				car_pan = clampf(dx / 2500.0, -1.0, 1.0)
+	var pi_ := floori(p_z / SEG_LEN)
+	for i in range(maxi(0, pi_ - 6), mini(segs.size(), pi_ + 31)):
+		var s: Dictionary = segs[i]
+		# only tables where somebody is actually sitting (same rule as draw_terrace)
+		if not s.terrace or i % 2:
+			continue
+		var people := 2 if hard else int(seat_rand(i, -1.0) < 0.6) + int(seat_rand(i, 1.0) < 0.6)
+		if people:
+			chatter = maxf(chatter, near_v(terrace_z(s) - p_z, 4000.0) * (1.0 if people == 2 else 0.7))
+	var fire := 0.0
+	var fire_pan := 0.0
+	for w in wrecks:
+		var sg := seg_at(w.z)
+		var dx: float = (-sg.side * sg.w * WRECK_LANE - player_x) * ROAD_W
+		var v := near_v(Vector2(w.z - p_z, dx).length(), 7000.0) * 1.2
+		if v > fire:
+			fire = minf(1.0, v)
+			fire_pan = clampf(dx / 2500.0, -1.0, 1.0)
+	for f in fires:
+		var dx: float = (f.x - player_x) * ROAD_W
+		var v := near_v(Vector2(f.z - p_z, dx).length(), 5500.0) * (1.0 if f.kind == "bin" else 0.7 * fire_scale(f))
+		if v > fire:
+			fire = v
+			fire_pan = clampf(dx / 2500.0, -1.0, 1.0)
+	sfx.ambient({"spray": spray * 0.15, "flies": flies * 0.09, "car": car * 0.5, "car_pan": car_pan,
+		"chatter": chatter * 0.45, "fire": fire * 0.14, "fire_pan": fire_pan})
 
 
 # ======================================================================
@@ -1049,6 +1152,10 @@ func jump() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	var key := event as InputEventKey
+	if lb.is_open():      # the scoreboard or profile panel is up: Esc closes it, nothing else
+		if key and key.pressed and key.physical_keycode == KEY_ESCAPE:
+			lb.close_panels()
+		return
 	if key:
 		if key.pressed and not key.echo:
 			match key.physical_keycode:
@@ -1308,6 +1415,8 @@ func _draw() -> void:
 			var xj: float = sg.side * (-sg.w + maxf(0.05, wet_reach(tr, zj)) * (0.25 + 0.6 * seat_rand(tr.seed, j)) - (0.35 if j % 3 == 0 else 0.0))
 			var o := {"throwing": 1.0 - tr.throw_t / 0.5} if tr.throw_t > 0.0 and tr.throw_j == j else {}
 			add.call(zj, draw_looter.bind(to_screen(zj, xj), tr.seed + j * 7.1, tr.t, false, o))
+	for c in cyclists:
+		add.call(c.z, draw_cyclist.bind(c))
 	for f in fires:
 		add.call(f.z, draw_fire.bind(to_screen(f.z, f.x), f))
 	for w in wrecks:
@@ -1785,23 +1894,64 @@ func draw_obelisk(p: Dictionary) -> void:
 
 
 ## bistro table with a coffee cup and two rattan chairs (the sitters come later)
-func draw_terrace(p: Dictionary, _seat_seed: int, side: int) -> void:
+## café guest seen from the side, facing the table (f = +1 right, -1 left), sipping now and then
+func draw_sitter(cx: float, y: float, k: float, f: float, r: float, sd: float) -> void:
+	var coat: Color = C_SITTER_COATS[int(r * 97) % C_SITTER_COATS.size()]
+	var hair: Color = C_SITTER_HAIR[int(r * 53) % C_SITTER_HAIR.size()]
+	var beret := int(r * 31) % 3 == 0
+	var sip := sin(step * 0.18 + sd * 1.7 + f) > 0.55      # raises the cup every few seconds
+	# legs: thigh along the seat, shin down to the floor
+	rect(minf(cx, cx + f * 190 * k), y - 520 * k, 190 * k, 60 * k, Color("2d3138"))
+	rect(cx + f * 160 * k - 28 * k, y - 480 * k, 56 * k, 470 * k, Color("2d3138"))
+	rect(cx + f * 160 * k - 30 * k + (0.0 if f > 0 else -30 * k), y - 30 * k, 90 * k, 30 * k, Color("3a2416"))
+	# torso and head
+	rect(cx - f * 15 * k - 65 * k, y - 920 * k, 130 * k, 420 * k, coat)
+	circ(cx + f * 5 * k, y - 1000 * k, 72 * k, Color("e8b98f"))
+	ell(cx - f * 8 * k, y - 1015 * k, 70 * k, 70 * k, hair, 0, PI, TAU)
+	if beret:
+		ell(cx, y - 1068 * k, 85 * k, 30 * k, Color("1b1e24"), -f * 0.2)
+	# arm with the cup: at the lips when sipping, otherwise resting by the table
+	var sx := cx + f * 20 * k
+	var sy := y - 860 * k
+	var hx := cx + f * 95 * k if sip else cx + f * 230 * k
+	var hy := y - 975 * k if sip else y - 730 * k
+	var ex := cx + f * 140 * k if sip else cx + f * 150 * k
+	var ey := y - 820 * k if sip else y - 720 * k
+	polyline([V(sx, sy), V(ex, ey), V(hx, hy)], maxf(1.5, 42 * k), coat)
+	rect(hx - 24 * k, hy - 50 * k, 48 * k, 55 * k, Color.WHITE)
+	rect(hx - 20 * k, hy - 50 * k, 40 * k, 10 * k, Color("5b3a24"))
+	if not sip and k > 0.05:      # a wisp of steam
+		var pts := []
+		for j in 6:
+			pts.append(V(hx + sin(step * 0.3 + j) * 12 * k, hy - 60 * k - j * 22 * k))
+		polyline(pts, maxf(1, 10 * k), Color(1, 1, 1, 0.6))
+
+
+## bistro table with a coffee cup and two rattan chairs; about 6 in 10 chairs have someone
+## having a coffee (the same people stay at the same tables)
+func draw_terrace(p: Dictionary, seat_seed: int, _side: int) -> void:
 	if p.is_empty():
 		return
 	var k: float = p.k
 	var x: float = p.x
 	var y: float = p.y
-	ell(x, y, 260 * k, 260 * k * p.flat, Color(0, 0, 0, 0.15))
+	var cw := 0.13 * ROAD_W * k
+	ell(x, y, TERRACE_HALF * ROAD_W * k, TERRACE_HALF * ROAD_W * k * p.flat, Color(0, 0, 0, 0.18))
 	for sd in [-1.0, 1.0]:
-		var cx: float = x + sd * 190 * k
-		rect(cx - 70 * k, y - 430 * k, 140 * k, 40 * k, Color("9a7448"))            # seat
-		rect(cx + sd * 50 * k, y - 800 * k, 25 * k * sd, 410 * k, Color("7a5a35"))   # back
-		rect(cx - 60 * k, y - 390 * k, 14 * k, 390 * k, Color("4a3a28"))
-		rect(cx + 46 * k, y - 390 * k, 14 * k, 390 * k, Color("4a3a28"))
-	rect(x - 12 * k, y - 680 * k, 24 * k, 680 * k, Color("2a2c30"))
-	rect(x - 90 * k, y - 20 * k, 180 * k, 20 * k, Color("2a2c30"))
-	ell(x, y - 690 * k, 170 * k, 40 * k, Color("b8b2a6"))
-	rect(x - 24 * k + side * 40 * k, y - 760 * k, 48 * k, 60 * k, Color("f4f2ea"))
+		var cx: float = x + sd * cw
+		rect(cx - 40 * k, y - 450 * k, 80 * k, 450 * k, Color("7a5532"))
+		rect(cx - 70 * k, y - 470 * k, 140 * k, 40 * k, Color("a77b4f"))
+		# chair back on the far side from the table, so a sitter faces the table
+		rect(cx + sd * 60 * k - 10 * k, y - 860 * k, 20 * k, 400 * k, Color("2f5d46") if seat_seed % 4 == 0 else Color("9b2f2b"))
+		circ(cx + sd * 60 * k, y - 880 * k, 25 * k, Color("c99d6a"))
+		var r := seat_rand(seat_seed, sd)
+		if r < 0.6:
+			draw_sitter(cx, y, k, -sd, r, seat_seed)
+	rect(x - 18 * k, y - 680 * k, 36 * k, 680 * k, Color("3a3a3a"))
+	rect(x - 90 * k, y - 20 * k, 180 * k, 20 * k, Color("3a3a3a"))
+	ell(x, y - 690 * k, 170 * k, 45 * k, Color("efece4"))
+	rect(x + 30 * k, y - 760 * k, 45 * k, 60 * k, Color.WHITE)
+	rect(x + 33 * k, y - 760 * k, 39 * k, 10 * k, Color("5b3a24"))
 
 
 # ---------- hazards ----------
@@ -1946,14 +2096,49 @@ func draw_car(p: Dictionary, car: Dictionary) -> void:
 	xf_reset()
 
 
-func draw_rider_head(x: float, y: float, r: float, head: String) -> void:
+func draw_rider_head(x: float, y: float, r: float, head: String, face := true) -> void:
 	circ(x, y, r, Color("e8b98f"))
 	if head == "helmet":
 		ell(x, y - r * 0.3, r * 1.15, r * 0.85, Color("e8e4d8"), 0, PI, TAU)
 	elif head == "beret":
 		ell(x + r * 0.2, y - r * 0.75, r * 1.1, r * 0.45, Color("1b1e24"), -0.15)
 	else:
-		ell(x, y, r * 1.02, r * 1.02, Color(head), 0, PI * 1.05, PI * 1.95)
+		if face:
+			ell(x, y, r * 1.02, r * 1.02, Color(head), 0, PI * 1.05, PI * 1.95)
+		else:      # from behind there is no face, only hair
+			circ(x, y, r * 1.02, Color(head))
+
+
+## cyclist on the street beside the sidewalk, seen from the front (oncoming) or from behind
+func draw_cyclist(c: Dictionary) -> void:
+	var seg := seg_at(c.z)
+	var p := to_screen(c.z, -c.side * seg.w * c.lane)
+	if p.is_empty():
+		return
+	var Hh: float = 470 * p.k
+	var lw := maxf(1, Hh * 0.05)
+	var pedal: float = sin(c.ph)
+	xf(V(p.x, p.y))
+	if seg.flip_x:
+		ga = maxf(0.0, 1.0 - (seg.ck + 1.0) / seg.cn)      # turning off where the street ends
+	ell(0, 0, Hh * 0.14, Hh * 0.14 * p.flat, Color(0, 0, 0, 0.2))
+	rect(-Hh * 0.025, -Hh * 0.4, Hh * 0.05, Hh * 0.4, Color("1b1e24"))      # tyre, end-on
+	rect(-Hh * 0.04, -Hh * 0.44, Hh * 0.08, Hh * 0.08, c.color)             # mudguard and frame
+	for sd in [-1.0, 1.0]:                                                   # legs pumping
+		var foot: float = -Hh * (0.2 + 0.09 * pedal * sd)
+		polyline([V(sd * Hh * 0.06, -Hh * 0.56), V(sd * Hh * 0.11, (foot - Hh * 0.56) / 2 - Hh * 0.04), V(sd * Hh * 0.05, foot)], lw * 1.4, Color("2d3748"))
+	fill(PackedVector2Array([V(-Hh * 0.1, -Hh * 0.55), V(Hh * 0.1, -Hh * 0.55), V(Hh * 0.13, -Hh * 0.86), V(-Hh * 0.13, -Hh * 0.86)]), c.coat)
+	for sd in [-1.0, 1.0]:                                                   # arms down to the handlebar
+		line(V(sd * Hh * 0.12, -Hh * 0.83), V(sd * Hh * 0.17, -Hh * 0.68), lw, c.coat)
+	line(V(-Hh * 0.18, -Hh * 0.67), V(Hh * 0.18, -Hh * 0.67), lw * 0.6, Color("4a4f57"))
+	if c.toward and c.basket:
+		rect(-Hh * 0.09, -Hh * 0.64, Hh * 0.18, Hh * 0.1, Color("9a7448"))
+	if c.throw_t > 0.0:                                                      # follow-through of a throw toward the pavement
+		var u: float = 1.0 - c.throw_t / 0.5
+		line(V(c.side * Hh * 0.12, -Hh * 0.83), V(c.side * Hh * (0.22 + 0.12 * u), -Hh * (1.12 - 0.2 * u)), lw * 1.1, c.coat)
+	draw_rider_head(0, -Hh * 0.95, Hh * 0.08, c.head, c.toward)
+	ga = 1.0
+	xf_reset()
 
 
 ## bike crossing the zebra crossing, seen from the side, pedals going round
@@ -2570,7 +2755,11 @@ func _build_ui() -> void:
 	_pin_top_right(sound_btn, HUD_H + 80)
 	sound_btn.theme_type_variation = "TabBtn"
 	sound_btn.pressed.connect(_toggle_sound)
+	sound_btn.text = "×" if sfx.muted else "♪"
 	root.add_child(sound_btn)
+	lb = preload("res://leaderboard.gd").new()
+	add_child(lb)
+	lb.setup(self, root, sbox, obox)
 
 
 ## a centred dark card with a title, paragraphs, the difficulty switch and a main button
@@ -2663,6 +2852,7 @@ func _set_mode(h: bool) -> void:
 
 func _toggle_sound() -> void:
 	var m: bool = sfx.toggle_mute()
+	_save()
 	sound_btn.text = "×" if m else "♪"
 	if not m:
 		sfx.play("plate")
@@ -2675,6 +2865,7 @@ func _load_save() -> void:
 	var cf := ConfigFile.new()
 	if cf.load(SAVE_PATH) == OK:
 		hard = cf.get_value("game", "mode", "normal") == "hard"
+		sfx.set_muted(cf.get_value("game", "muted", false))
 	_load_best()
 
 
@@ -2689,6 +2880,7 @@ func _save() -> void:
 	var cf := ConfigFile.new()
 	cf.load(SAVE_PATH)
 	cf.set_value("game", "mode", "hard" if hard else "normal")
+	cf.set_value("game", "muted", sfx.muted)
 	var key := "hard" if hard else "normal"
 	cf.set_value("best", key, maxi(best, cf.get_value("best", key, 0)))
 	cf.save(SAVE_PATH)
