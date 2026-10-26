@@ -5,8 +5,8 @@ extends Node
 ## so a desktop build shows the board read-only; a web export served from that address can
 ## post records.
 
-const LB_URL := "https://liiephbpoccyyahwkqrv.supabase.co"
-const LB_KEY := "sb_publishable_erfuUfZP4osTTLx90rlksw_NZ_HPdV5"    # publishable (public) key, as in the web version
+const LB_URL := "https://gllavqpnvexijgwwgjtv.supabase.co"
+const LB_KEY := "sb_publishable_iRMrB2hrMEW2TdI7dLTMPQ_MKETrBEX"    # publishable (public) key, as in the web version
 const SAVE_PATH := "user://paris_walk.cfg"
 const AVATARS := ["🥖", "🗼", "🐕", "🐦", "👞", "🥐", "🧀", "🍷", "🎨", "🚲", "🐀", "🎩"]
 const ERRORS := {
