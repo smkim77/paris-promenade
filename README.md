@@ -1,7 +1,10 @@
 # 파리 산책하기 — Godot 4 포트 (실험용 프로토타입)
 
 웹 버전 [파리 산책하기](https://smkim77.github.io/paris-walk/)(`D:\_work\paris-walk\index.html`)를
-Godot 4로 옮겨 본 첫 번째 플레이 가능한 버전입니다. 웹 버전은 그대로 두고, 이 폴더는 별도 실험입니다.
+Godot 4로 옮겨 본 버전입니다. 웹 버전은 그대로 두고, 이 폴더는 별도 실험입니다.
+
+**플레이: https://smkim77.github.io/paris-walk-godot/** (PC·휴대폰 브라우저). GitHub Pages가 `main` 브랜치의
+`docs/`(Godot 웹 빌드)를 서비스합니다. 순위표는 웹 버전과 같은 순위표를 씁니다.
 
 ## 실행하기
 
@@ -83,14 +86,14 @@ P/Esc 일시 정지 · M 소리. 마우스/터치: 좌우 드래그로 이동, �
 `export_presets.cfg`의 'Web' 프리셋은 GitHub Pages에서 돌도록 스레드 지원을 끈 설정입니다.
 
 ```powershell
-& "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GodotEngine.GodotEngine_Microsoft.Winget.Source_8wekyb3d8bbwe\Godot_v4.7.2-stable_win64_console.exe" --headless --path D:\_work\paris-walk-godot --export-release Web build/web/index.html
+& "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GodotEngine.GodotEngine_Microsoft.Winget.Source_8wekyb3d8bbwe\Godot_v4.7.2-stable_win64_console.exe" --headless --path D:\_work\paris-walk-godot --export-release Web docs/index.html
 ```
 
-결과는 `build/web/`(git에는 넣지 않음). 엔진(`index.wasm`) 39.5MB + 게임 데이터 2.5MB, gzip으로 전송하면 약 12MB.
+결과는 `docs/`(GitHub Pages가 이 폴더를 그대로 서비스). 엔진(`index.wasm`) 39.5MB + 게임 데이터 2.5MB, gzip으로 전송하면 약 12MB.
 `file://`로는 열리지 않으므로 로컬 서버로 엽니다:
 
 ```powershell
-python -m http.server 8060 --directory D:\_work\paris-walk-godot\build\web
+python -m http.server 8060 --directory D:\_work\paris-walk-godot\docs
 ```
 
 → PC 브라우저에서 http://localhost:8060 . 같은 와이파이의 휴대폰으로 보려면 `--bind 0.0.0.0`을 붙이고
@@ -100,7 +103,6 @@ python -m http.server 8060 --directory D:\_work\paris-walk-godot\build\web
 ## 아직 안 된 것
 
 - 실제 휴대폰(안드로이드 Chrome, 아이폰 Safari)에서 속도·조작·소리 확인 — PC 브라우저(60fps)와 휴대폰 크기 흉내로는 확인함
-- GitHub Pages 배포(새 저장소 `smkim77/paris-walk-godot` → https://smkim77.github.io/paris-walk-godot/ 이면 순위 서버의 허용 주소와 맞음)
 - 안전 영역(노치): 브라우저가 페이지를 안전 영역 안에 두므로 웹에서는 따로 처리하지 않음. 앱으로 낼 때는 필요
 - `prefers-reduced-motion`(움직임 줄이기) 대응
 - 어려움 모드 전용 우울한 왈츠(웹 버전 코드에 있지만 실제로는 폭동 곡이 쓰임)와 '죽음의 무도' 곡은 옮기지 않음
