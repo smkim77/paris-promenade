@@ -49,9 +49,9 @@ func setup(g: Node, root: Control, start_box: VBoxContainer, over_box: VBoxConta
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 8)
-	row.add_child(_btn("🏆 순위 보기", open_board))
+	row.add_child(_icon_btn("🏆", "순위 보기", open_board))
 	if can_write:
-		profile_btn = _btn("", func(): open_profile())
+		profile_btn = _icon_btn("🙂", "", func(): open_profile())
 		row.add_child(profile_btn)
 		_update_profile_button()
 	start_box.add_child(row)
@@ -68,7 +68,7 @@ func setup(g: Node, root: Control, start_box: VBoxContainer, over_box: VBoxConta
 	orow.alignment = BoxContainer.ALIGNMENT_CENTER
 	orow.add_theme_constant_override("separation", 8)
 	orow.add_child(over_action)
-	orow.add_child(_btn("🏆 순위 보기", open_board))
+	orow.add_child(_icon_btn("🏆", "순위 보기", open_board))
 	over_box.add_child(over_status)
 	over_box.move_child(over_status, 4)
 	over_box.add_child(orow)
@@ -152,7 +152,8 @@ func has_nickname() -> bool:
 
 func _update_profile_button() -> void:
 	if profile_btn:
-		profile_btn.text = "%s %s" % [profile.get("avatar", "🙂"), profile.nickname] if has_nickname() else "닉네임 정하기"
+		_set_icon_btn(profile_btn, profile.avatar if has_nickname() and profile.get("avatar", "") != "" else "🙂",
+			profile.nickname if has_nickname() else "닉네임 정하기")
 
 
 # ---------- after each game: post the run (asking for a nickname the first time) ----------
@@ -250,7 +251,7 @@ func _board_row(r: Dictionary) -> Control:
 	var rk := _label(_n(r.get("rank")), 16)
 	rk.custom_minimum_size.x = 30
 	row.add_child(rk)
-	row.add_child(_label(str(r.get("avatar", "🙂")) if r.get("avatar") else "🙂", 20))
+	row.add_child(Icons.make(str(r.avatar) if r.get("avatar") else "🙂", 26))
 	var name_box := VBoxContainer.new()
 	name_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_box.add_theme_constant_override("separation", 0)
@@ -329,7 +330,7 @@ func _pick_avatar(a: String) -> void:
 
 func _render_avatars() -> void:
 	for b in avatar_btns:
-		b.button_pressed = b.text == picked_avatar
+		b.button_pressed = b.get_meta("id") == picked_avatar
 
 
 func save_profile(_t := "") -> void:
@@ -365,7 +366,13 @@ func _build_profile(root: Control) -> void:
 	grid.add_theme_constant_override("h_separation", 6)
 	grid.add_theme_constant_override("v_separation", 6)
 	for a in AVATARS:
-		var b := _tab(a, _pick_avatar.bind(a))
+		var b := _tab("", _pick_avatar.bind(a))
+		b.set_meta("id", a)
+		var ic := CenterContainer.new()
+		ic.set_anchors_preset(Control.PRESET_FULL_RECT)
+		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ic.add_child(Icons.make(a, 30))
+		b.add_child(ic)
 		b.custom_minimum_size = Vector2(52, 44)
 		b.add_theme_font_size_override("font_size", 22)
 		avatar_btns.append(b)
@@ -454,6 +461,32 @@ func _btn(s: String, on: Callable) -> Button:
 	b.theme_type_variation = "TabBtn"
 	b.pressed.connect(on)
 	return b
+
+
+## a button with a drawn icon before its text (emoji don't render on web / mobile builds)
+func _icon_btn(icon_id: String, s: String, on: Callable) -> Button:
+	var b := _btn("", on)
+	var box := HBoxContainer.new()
+	box.set_anchors_preset(Control.PRESET_FULL_RECT)
+	box.alignment = BoxContainer.ALIGNMENT_CENTER
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_theme_constant_override("separation", 6)
+	var ic := Icons.make(icon_id, 20)
+	var l := Label.new()
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(ic)
+	box.add_child(l)
+	b.add_child(box)
+	b.set_meta("icon", ic)
+	b.set_meta("label", l)
+	_set_icon_btn(b, icon_id, s)
+	return b
+
+
+func _set_icon_btn(b: Button, icon_id: String, s: String) -> void:
+	b.get_meta("icon").id = icon_id
+	b.get_meta("label").text = s
+	b.custom_minimum_size = Vector2(game.font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x + 64, 40)
 
 
 func _tab(s: String, on: Callable) -> Button:

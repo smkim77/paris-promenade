@@ -8,7 +8,7 @@ extends Node2D
 ## sidewalk edge.
 
 const SEG_LEN := 200.0
-const DRAW := 160
+const DRAW := 160            # segments generated / simulated ahead
 const ROAD_W := 700.0
 const CAM_H := 1000.0
 const CAM_DEPTH := 0.84
@@ -135,6 +135,8 @@ var run_time := 0.0
 
 # ---------- render scratch ----------
 var rows: Array = []
+var draw_n := DRAW             # segments actually drawn: shortened on a phone that can't keep up
+var fps_low_t := 0.0
 var cam_x := 0.0
 var base_idx := 0
 var player_screen := Vector2.ZERO
@@ -173,6 +175,11 @@ var lb: Node                  # online scoreboard (leaderboard.gd)
 
 func _ready() -> void:
 	randomize()
+	# the Korean font has no accented Latin letters (é, è, à…): fall back to Godot's built-in font,
+	# which every build carries (on the web there are no system fonts to fall back on)
+	var fb: Array[Font] = [ThemeDB.fallback_font]
+	font.fallbacks = fb
+	font_bold.fallbacks = fb
 	for i in 48:
 		ROOFS.append({"w": 26 + ((i * 37) % 40), "h": 10 + ((i * 53) % 26), "chim": i % 3})
 	_load_save()
@@ -766,7 +773,22 @@ func _process(delta: float) -> void:
 	_layout()
 	if state == PLAY:
 		update(minf(delta, 0.05))
+		_adapt_quality(delta)
 	queue_redraw()
+
+
+## a slow phone: after 2 s below 45 fps, draw 15 fewer segments of the street (down to 85);
+## the far end just appears a little later
+func _adapt_quality(delta: float) -> void:
+	if draw_n <= 85:
+		return
+	if Engine.get_frames_per_second() < 45:
+		fps_low_t += delta
+		if fps_low_t > 2.0:
+			draw_n -= 15
+			fps_low_t = 0.0
+	else:
+		fps_low_t = 0.0
 
 
 func update(dt: float) -> void:
@@ -1143,6 +1165,13 @@ func update_ambience(p_z: float) -> void:
 # input
 # ======================================================================
 
+func _notification(what: int) -> void:
+	# switching apps or tabs (or the phone locking) pauses the walk, like the web version
+	if what in [NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_APPLICATION_PAUSED] and state == PLAY \
+			and not OS.get_cmdline_user_args().has("--autoplay"):
+		toggle_pause()
+
+
 func jump() -> void:
 	if state != PLAY or jump_t > 0.0:
 		return
@@ -1363,7 +1392,7 @@ func _draw() -> void:
 	var x := 0.0
 	var dx: float = -(segs[base_idx].curve * base_pct)
 	rows = []
-	for n in DRAW:
+	for n in draw_n:
 		var i := base_idx + n
 		var seg: Dictionary = segs[i]
 		var zs := i * SEG_LEN
@@ -1379,7 +1408,7 @@ func _draw() -> void:
 	var buckets := {}
 	var add := func(z: float, fn: Callable) -> void:
 		var n := floori(z / SEG_LEN) - base_idx
-		if n < 0 or n >= DRAW:
+		if n < 0 or n >= draw_n:
 			return
 		if not buckets.has(n):
 			buckets[n] = []
@@ -1439,7 +1468,7 @@ func _draw() -> void:
 			var lz: float = c.lanes[car.lane]
 			add.call(lz, (draw_bike if car.bike else draw_car).bind(to_screen(lz, car.x), car))
 
-	for n in range(DRAW - 1, -1, -1):
+	for n in range(draw_n - 1, -1, -1):
 		draw_segment(rows[n])
 		if buckets.has(n):
 			var list: Array = buckets[n]
@@ -2646,12 +2675,15 @@ func draw_pace_gauge() -> void:
 ## top bar: score, distance, shoes, best; with the street name under it
 func draw_hud() -> void:
 	rect(0, 0, W, HUD_H, Color(0.106, 0.118, 0.141, 0.82))
-	var cols := [["점수", _fmt(floori(score))], ["거리", "%d m" % floori(dist)], ["구두", "👞".repeat(maxi(0, lives)) if lives > 0 else "—"], ["최고 점수", _fmt(best)]]
+	var cols := [["점수", _fmt(floori(score))], ["거리", "%d m" % floori(dist)], ["구두", "" if lives > 0 else "—"], ["최고 점수", _fmt(best)]]
 	var cw := W / cols.size()
 	for j in cols.size():
 		var cx := cw * (j + 0.5)
 		text(cols[j][0], V(cx, 16), 11, Color("b9b3a8"), HORIZONTAL_ALIGNMENT_CENTER, font)
 		text(cols[j][1], V(cx, 37), 18, Color("f2d27a") if j == 0 else Color.WHITE)
+	flush()
+	for k in maxi(0, lives):      # one drawn shoe per pair left (emoji don't render on web / mobile)
+		Icons.paint(self, "👞", V(cw * 2.5 + (k - (lives - 1) / 2.0) * 24, 31), 22)
 	var p: Dictionary = PLACES[place_at(dist)]
 	text("%s · PARIS %s Arr." % [p.street, p.arr], V(W / 2, HUD_H + 18), 13, Color("1b1e24"), HORIZONTAL_ALIGNMENT_CENTER, font, 4, Color(1, 1, 1, 0.75))
 
@@ -2696,8 +2728,8 @@ func _build_ui() -> void:
 	tab.bg_color = Color(1, 1, 1, 0.12)
 	tab.content_margin_left = 14
 	tab.content_margin_right = 14
-	tab.content_margin_top = 6
-	tab.content_margin_bottom = 6
+	tab.content_margin_top = 9
+	tab.content_margin_bottom = 9
 	var tab_on: StyleBoxFlat = tab.duplicate()
 	tab_on.bg_color = Color("c8372d")
 	var tab_hover: StyleBoxFlat = tab.duplicate()
@@ -2717,7 +2749,10 @@ func _build_ui() -> void:
 		"서두를수록 점수가 커지지만, 구석으로만 걸으면 오히려 위험해요.",
 	], "산책 시작")
 	var keys := Label.new()
-	keys.text = "← → 이동 · ↑ ↓ 속도 · Space 점프 · P 정지 · M 소리\n(터치: 드래그로 이동·속도, 탭으로 점프)"
+	if DisplayServer.is_touchscreen_available():
+		keys.text = "좌우로 드래그해서 이동 · 위아래로 드래그해서 속도\n짧게 탭하면 점프 · II 버튼으로 일시 정지"
+	else:
+		keys.text = "← → 이동 · ↑ ↓ 속도 · Space 점프 · P 정지 · M 소리\n(터치: 드래그로 이동·속도, 탭으로 점프)"
 	keys.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	keys.add_theme_font_size_override("font_size", 13)
 	keys.modulate = Color(1, 1, 1, 0.75)
@@ -2752,7 +2787,7 @@ func _build_ui() -> void:
 	sound_btn = Button.new()
 	sound_btn.text = "♪"
 	sound_btn.focus_mode = Control.FOCUS_NONE
-	_pin_top_right(sound_btn, HUD_H + 80)
+	_pin_top_right(sound_btn, HUD_H + 88)
 	sound_btn.theme_type_variation = "TabBtn"
 	sound_btn.pressed.connect(_toggle_sound)
 	sound_btn.text = "×" if sfx.muted else "♪"
@@ -2825,10 +2860,10 @@ func _overlay(root: Control, title: String, paras: Array, button: String) -> Con
 func _pin_top_right(b: Control, top: float) -> void:
 	b.anchor_left = 1.0
 	b.anchor_right = 1.0
-	b.offset_left = -56
+	b.offset_left = -64
 	b.offset_right = -12
 	b.offset_top = top
-	b.offset_bottom = top + 40
+	b.offset_bottom = top + 46
 
 
 func _para(s: String) -> Label:

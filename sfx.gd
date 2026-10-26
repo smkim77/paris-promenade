@@ -1,23 +1,30 @@
 extends Node
-## All sound, synthesised in code like the web version's Web Audio (no sound files):
-## - effects: rendered once at start-up into short PCM clips, played from a pool of players
-## - music: The Skaters' Waltz (normal mode) and the riot piece (hard mode), each rendered on a
-##   worker thread into one seamless loop
+## All sound is synthesised in code, like the web version's Web Audio:
+## - effects: short clips, played from a pool of players
+## - music: The Skaters' Waltz (normal mode) and the riot piece (hard mode), each one seamless loop
 ## - ambience: looping beds (spray, flies, traffic, café chatter, fire) whose volume and stereo
 ##   position follow what is near the walker (see game.gd update_ambience)
+## The synthesis takes several seconds of GDScript, too slow to run at start-up in a browser
+## (web builds have no worker threads), so tools/render_audio.gd renders everything once into
+## audio/*.wav, which Godot imports QOA-compressed; at runtime this script only loads them.
+## Re-run that tool after changing any sound.
 
 const RATE := 22050
 const MASTER := 1.2          # the web version's master gain (0.6), doubled so the game isn't too quiet
 const MUSIC := 0.22          # background music level, kept low
+const AUDIO_DIR := "res://audio/"
+const EFFECTS := ["splat", "pee", "flies", "birdHit", "honk", "throw", "shatter", "burn", "crash", "spray",
+	"jump", "plate", "over", "start", "grumble0", "grumble1", "grumble2", "grumble3",
+	"drop15", "drop16", "drop17", "drop18", "drop19", "drop20", "drop21", "drop22", "drop23", "drop24", "drop25"]
+const AMB_BUS := {"spray": "AmbLeft", "flies": "Master", "road": "AmbCar", "engine": "AmbCar",
+	"chat": "AmbRight", "murmur": "AmbRight", "fire": "AmbFire"}
 
 var clips := {}
 var players: Array[AudioStreamPlayer] = []
 var next_player := 0
 var muted := false
 var music: AudioStreamPlayer
-var tracks := {}             # "waltz" / "riot" -> AudioStreamWAV, once rendered
-var want_track := ""
-var tasks: Array[int] = []
+var tracks := {}             # "waltz" / "riot" -> AudioStream
 var amb := {}                # channel -> {"player", "level", "target"}
 var amb_on := false
 var bus_car := -1
@@ -35,15 +42,29 @@ func _ready() -> void:
 	bus_fire = _bus("AmbFire", 0.0)
 	_bus("AmbLeft", -0.55)
 	_bus("AmbRight", 0.55)
+	for e in EFFECTS:
+		clips[e] = load(AUDIO_DIR + e + ".wav")
+	for t in ["waltz", "riot"]:
+		tracks[t] = load(AUDIO_DIR + t + ".wav")
+	for ch in AMB_BUS:
+		var p := AudioStreamPlayer.new()
+		p.stream = load(AUDIO_DIR + "amb_" + ch + ".wav")
+		p.bus = AMB_BUS[ch]
+		p.volume_db = -80.0
+		add_child(p)
+		amb[ch] = {"player": p, "level": 0.0, "target": 0.0}
+
+
+## render every sound into dir as .wav (run by tools/render_audio.gd, not by the game)
+func render_all(dir: String) -> void:
 	_build_effects()
-	tasks.append(WorkerThreadPool.add_task(_render_track.bind("waltz")))
-	tasks.append(WorkerThreadPool.add_task(_render_track.bind("riot")))
-	tasks.append(WorkerThreadPool.add_task(_render_ambience))
-
-
-func _exit_tree() -> void:
-	for t in tasks:
-		WorkerThreadPool.wait_for_task_completion(t)
+	for k in clips:
+		clips[k].save_to_wav(dir + k + ".wav")
+	_waltz().save_to_wav(dir + "waltz.wav")
+	_riot().save_to_wav(dir + "riot.wav")
+	var loops := _ambience_loops()
+	for ch in loops:
+		loops[ch].save_to_wav(dir + "amb_" + ch + ".wav")
 
 
 func _bus(bus_name: String, pan: float) -> int:
@@ -89,13 +110,9 @@ func toggle_mute() -> bool:
 
 ## start a piece ("waltz" / "riot"), from the top; it begins as soon as it has been rendered
 func music_play(track: String) -> void:
-	want_track = track
 	music.stream_paused = false
-	if tracks.has(track):
-		music.stream = tracks[track]
-		music.play()
-	else:
-		music.stop()
+	music.stream = tracks[track]
+	music.play()
 
 
 func music_resume() -> void:
@@ -113,7 +130,6 @@ func quiet() -> void:
 
 
 func music_stop() -> void:
-	want_track = ""
 	music.stop()
 
 
@@ -155,26 +171,8 @@ func _process(delta: float) -> void:
 		p.volume_db = linear_to_db(ch.level * MASTER)
 
 
-func _track_ready(track: String, w: AudioStreamWAV) -> void:
-	tracks[track] = w
-	if want_track == track:
-		music_play(track)
-
-
-func _ambience_ready(loops: Dictionary) -> void:
-	var buses := {"spray": "AmbLeft", "flies": "Master", "road": "AmbCar", "engine": "AmbCar",
-		"chat": "AmbRight", "murmur": "AmbRight", "fire": "AmbFire"}
-	for ch in loops:
-		var p := AudioStreamPlayer.new()
-		p.stream = loops[ch]
-		p.bus = buses[ch]
-		p.volume_db = -80.0
-		add_child(p)
-		amb[ch] = {"player": p, "level": 0.0, "target": 0.0}
-
-
 # ======================================================================
-# synthesis building blocks (pure functions of their buffers, safe on worker threads)
+# synthesis building blocks (used by render_all)
 # ======================================================================
 
 func _buf(dur: float) -> PackedFloat32Array:
@@ -532,11 +530,6 @@ func _grumble() -> PackedFloat32Array:
 # music
 # ======================================================================
 
-func _render_track(track: String) -> void:
-	var w := _waltz() if track == "waltz" else _riot()
-	call_deferred("_track_ready", track, w)
-
-
 # The Skaters' Waltz (Les Patineurs, Émile Waldteufel, 1882, public domain) — the web version's
 # quiet accordion arrangement of Waltz No. 1: the main theme (A major) twice, the second strain
 # (D major) twice, then the high, bouncy middle twice. 3/4: bass on beat 1, chord on beats 2 and 3.
@@ -693,7 +686,7 @@ func _snare(b: PackedFloat32Array, t: float, gain: float) -> void:
 # ambience beds
 # ======================================================================
 
-func _render_ambience() -> void:
+func _ambience_loops() -> Dictionary:
 	var loops := {}
 	# hiss of water on stone
 	var b := _buf(2.3)
@@ -728,7 +721,7 @@ func _render_ambience() -> void:
 		_noise(b, {"delay": randf() * 3.2, "dur": 0.015 + randf() * 0.03, "gain": 0.6 + randf(), "freq": 1500.0 + randf() * 3500.0,
 			"filter": "bandpass", "q": 2.5, "attack": 0.002})
 	loops["fire"] = _wav(_xfade(b, 3.0), 1.0, int(3.0 * RATE))
-	call_deferred("_ambience_ready", loops)
+	return loops
 
 
 ## white noise through a chain of biquads, added to b at the given gain
