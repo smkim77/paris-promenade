@@ -3,7 +3,7 @@
 웹 버전 [파리 산책하기](https://smkim77.github.io/paris-walk/)(`D:\_work\paris-walk\index.html`)를
 Godot 4로 옮겨 본 버전입니다. 웹 버전은 그대로 두고, 이 폴더는 별도 실험입니다.
 
-**플레이: https://smkim77.github.io/paris-walk-godot/** (PC·휴대폰 브라우저). GitHub Pages가 `main` 브랜치의
+**플레이: https://smkim77.github.io/paris-promenade/** (PC·휴대폰 브라우저, 저장소 `smkim77/paris-promenade`). GitHub Pages가 `main` 브랜치의
 `docs/`(Godot 웹 빌드)를 서비스합니다. 순위표는 웹 버전과 같은 순위표를 씁니다.
 
 ## 실행하기
