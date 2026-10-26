@@ -8,10 +8,18 @@ Godot 4로 옮겨 본 첫 번째 플레이 가능한 버전입니다. 웹 버전
 이 PC에는 Godot 4.7.2 (.NET/Mono 빌드)가 winget으로 설치돼 있습니다. GDScript만 쓰므로 일반 빌드여도 됩니다.
 
 - **에디터로 열기**: Godot 실행 → 프로젝트 관리자에서 *가져오기* → 이 폴더의 `project.godot` 선택 → F5
-- **바로 실행 (명령줄)**:
+- **바로 실행**: 폴더의 `run.cmd`를 더블클릭하거나, PowerShell에서
 
-  ```bash
-  "$LOCALAPPDATA/Microsoft/WinGet/Packages/GodotEngine.GodotEngine.Mono_Microsoft.Winget.Source_8wekyb3d8bbwe/Godot_v4.7.2-stable_mono_win64/Godot_v4.7.2-stable_mono_win64.exe" --path "D:/_work/paris-walk-godot"
+  ```powershell
+  D:\_work\paris-walk-godot\run.cmd
+  ```
+
+  어려움 모드로 바로 시작하려면 `run.cmd hard`.
+- PowerShell에서 Godot을 직접 부를 때는 앞에 `&`를 붙이고 `$env:LOCALAPPDATA`를 씁니다
+  (bash식 `"$LOCALAPPDATA/..." --path`는 PowerShell에서 `Unexpected token` 오류가 납니다):
+
+  ```powershell
+  & "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GodotEngine.GodotEngine.Mono_Microsoft.Winget.Source_8wekyb3d8bbwe\Godot_v4.7.2-stable_mono_win64\Godot_v4.7.2-stable_mono_win64.exe" --path "D:\_work\paris-walk-godot"
   ```
 
 - 테스트용: `-- --autoplay` 를 붙이면 시작 화면 없이 바로 걷기 시작합니다 (헤드리스 점검에 사용). `-- --autoplay --hard` 는 어려움 모드로.
