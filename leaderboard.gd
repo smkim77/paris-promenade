@@ -86,6 +86,8 @@ func is_open() -> bool:
 func call_api(fn: String, body: Dictionary) -> Dictionary:
 	var http := HTTPRequest.new()
 	http.timeout = 15.0
+	# in a browser the response arrives already unzipped; letting Godot gunzip it again fails
+	http.accept_gzip = false
 	add_child(http)
 	var headers := ["apikey: " + LB_KEY, "Authorization: Bearer " + LB_KEY, "Content-Type: application/json"]
 	var err := http.request(LB_URL + "/rest/v1/rpc/" + fn, headers, HTTPClient.METHOD_POST, JSON.stringify(body))

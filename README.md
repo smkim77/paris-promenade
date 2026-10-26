@@ -77,11 +77,30 @@ P/Esc 일시 정지 · M 소리. 마우스/터치: 좌우 드래그로 이동, �
 - **웹·모바일 대비**: 다른 앱/탭으로 넘어가면 자동 일시 정지, 터치 기기에서는 시작 화면에 터치 조작 안내,
   손가락에 맞춘 버튼 크기, 세로 화면 설정(앱으로 낼 때), 느린 폰에서 2초 넘게 45fps 아래면 먼 거리 그리기를 줄임(160 → 최소 85 구간)
 
+## 웹 빌드
+
+표준(.NET 아닌) Godot 4.7.2 에디터와 4.7.2 내보내기 템플릿이 필요합니다(둘 다 이 PC에 설치됨).
+`export_presets.cfg`의 'Web' 프리셋은 GitHub Pages에서 돌도록 스레드 지원을 끈 설정입니다.
+
+```powershell
+& "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GodotEngine.GodotEngine_Microsoft.Winget.Source_8wekyb3d8bbwe\Godot_v4.7.2-stable_win64_console.exe" --headless --path D:\_work\paris-walk-godot --export-release Web build/web/index.html
+```
+
+결과는 `build/web/`(git에는 넣지 않음). 엔진(`index.wasm`) 39.5MB + 게임 데이터 2.5MB, gzip으로 전송하면 약 12MB.
+`file://`로는 열리지 않으므로 로컬 서버로 엽니다:
+
+```powershell
+python -m http.server 8060 --directory D:\_work\paris-walk-godot\build\web
+```
+
+→ PC 브라우저에서 http://localhost:8060 . 같은 와이파이의 휴대폰으로 보려면 `--bind 0.0.0.0`을 붙이고
+`http://<PC의 IPv4 주소>:8060`으로 엽니다(Windows 방화벽이 물으면 허용). 단, 주소가 localhost나 https가 아니면
+브라우저가 일부 기능(소리 처리 등)을 막을 수 있어서, 휴대폰 확인은 GitHub Pages(https)에 올린 뒤가 확실합니다.
+
 ## 아직 안 된 것
 
-- **웹 내보내기**: 표준(비 .NET) Godot 에디터와 내보내기 템플릿이 필요합니다(설치된 .NET 에디터는 웹 내보내기 불가).
-  내보낼 때 'Thread Support'는 꺼야 GitHub Pages에서 돌아갑니다.
-- 실제 휴대폰(안드로이드 Chrome, 아이폰 Safari)에서 속도·조작·소리 확인
+- 실제 휴대폰(안드로이드 Chrome, 아이폰 Safari)에서 속도·조작·소리 확인 — PC 브라우저(60fps)와 휴대폰 크기 흉내로는 확인함
+- GitHub Pages 배포(새 저장소 `smkim77/paris-walk-godot` → https://smkim77.github.io/paris-walk-godot/ 이면 순위 서버의 허용 주소와 맞음)
 - 안전 영역(노치): 브라우저가 페이지를 안전 영역 안에 두므로 웹에서는 따로 처리하지 않음. 앱으로 낼 때는 필요
 - `prefers-reduced-motion`(움직임 줄이기) 대응
 - 어려움 모드 전용 우울한 왈츠(웹 버전 코드에 있지만 실제로는 폭동 곡이 쓰임)와 '죽음의 무도' 곡은 옮기지 않음
