@@ -1058,12 +1058,12 @@ func update(dt: float) -> void:
 				if over_t:
 					return
 				break
-	# fire: a burning bin is too tall to jump; a patch of fire on the ground can be jumped
+	# fire: a burning bin, a burning heap of rubbish and a patch of fire on the ground can all be jumped
 	if invuln <= 0.0:
 		for f in fires:
 			if f.get("under", false) or absf(f.z - p_z) > reach + 40.0:
 				continue
-			if f.kind == "patch" and airborne():
+			if airborne():
 				continue
 			var r: float = 0.16 if f.kind == "bin" else f.r * fire_scale(f)
 			if r > 0.04 and absf(f.x - player_x) < r + 0.07:
