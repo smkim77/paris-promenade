@@ -172,6 +172,14 @@ var diff_buttons: Array = []
 var pause_btn: Button
 var sound_btn: Button
 var lb: Node                  # online scoreboard (leaderboard.gd)
+# on-screen pad for phones: ◀ ▶ bottom-left, 점프 bottom-right. TouchScreenButtons follow each finger
+# separately, so you can keep walking sideways while tapping 점프 (the drawing is ours, in draw_pad)
+var pad_left: TouchScreenButton
+var pad_right: TouchScreenButton
+var pad_jump: TouchScreenButton
+var touch_pad := false         # a touch screen (or `-- --touchpad` to try it with a mouse-less test)
+const PAD_R := 32.0            # ◀ ▶ radius
+const PAD_JR := 40.0           # 점프 radius
 
 
 func _ready() -> void:
@@ -185,6 +193,7 @@ func _ready() -> void:
 		ROOFS.append({"w": 26 + ((i * 37) % 40), "h": 10 + ((i * 53) % 26), "chim": i % 3})
 	_load_save()
 	_build_ui()
+	_build_pad()
 	_set_mode(hard)
 	_layout()
 	reset()
@@ -202,6 +211,50 @@ func _layout() -> void:
 	HORIZON = H * 0.44
 	K = H * 0.96 - HORIZON                # vertical: walker's feet near the bottom
 	K2 = 0.33 * minf(W, H * 0.9) * CAM_H / ROAD_W   # horizontal: sidewalk spans ~80% of a portrait screen
+	if pad_left:
+		var by := H - 12 - PAD_R
+		pad_left.position = V(12 + PAD_R, by)
+		pad_right.position = V(12 + PAD_R * 3 + 10, by)
+		pad_jump.position = V(W - 12 - PAD_JR, H - 12 - PAD_JR)
+		var on := pad_on() and state == PLAY
+		pad_left.visible = on
+		pad_right.visible = on
+		pad_jump.visible = on
+
+
+func _build_pad() -> void:
+	touch_pad = DisplayServer.is_touchscreen_available() or OS.get_cmdline_user_args().has("--touchpad")
+	for a in ["pad_left", "pad_right"]:
+		if not InputMap.has_action(a):
+			InputMap.add_action(a)
+	var make := func(r: float, action: String) -> TouchScreenButton:
+		var b := TouchScreenButton.new()
+		var c := CircleShape2D.new()
+		c.radius = r
+		b.shape = c
+		b.shape_centered = true
+		b.action = action
+		b.visible = false
+		add_child(b)
+		return b
+	pad_left = make.call(PAD_R, "pad_left")
+	pad_right = make.call(PAD_R, "pad_right")
+	pad_jump = make.call(PAD_JR, "")
+	pad_jump.pressed.connect(jump)
+
+
+func pad_on() -> bool:
+	return touch_pad and (state == PLAY or state == PAUSED)
+
+
+## is a screen point on one of the pad buttons? (those touches must not also start a drag or a tap-jump)
+func on_pad(pos: Vector2) -> bool:
+	if not (pad_left and pad_left.visible):
+		return false
+	for b in [[pad_left, PAD_R], [pad_right, PAD_R], [pad_jump, PAD_JR]]:
+		if pos.distance_to(b[0].position) <= b[1] + 6:
+			return true
+	return false
 
 
 # ======================================================================
@@ -795,8 +848,8 @@ func _adapt_quality(delta: float) -> void:
 func update(dt: float) -> void:
 	var up := Input.is_physical_key_pressed(KEY_UP) or Input.is_physical_key_pressed(KEY_W)
 	var down := Input.is_physical_key_pressed(KEY_DOWN) or Input.is_physical_key_pressed(KEY_S)
-	var left := Input.is_physical_key_pressed(KEY_LEFT) or Input.is_physical_key_pressed(KEY_A)
-	var right := Input.is_physical_key_pressed(KEY_RIGHT) or Input.is_physical_key_pressed(KEY_D)
+	var left := Input.is_physical_key_pressed(KEY_LEFT) or Input.is_physical_key_pressed(KEY_A) or Input.is_action_pressed("pad_left")
+	var right := Input.is_physical_key_pressed(KEY_RIGHT) or Input.is_physical_key_pressed(KEY_D) or Input.is_action_pressed("pad_right")
 	if up or down or left or right:
 		drag = {}
 	pace += (int(up) - int(down)) * 0.8 * dt
@@ -1214,6 +1267,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	var mb := event as InputEventMouseButton
 	if mb and mb.button_index == MOUSE_BUTTON_LEFT:
 		if mb.pressed:
+			if on_pad(mb.position):
+				return
 			drag = {"x0": mb.position.x, "cur": mb.position.x, "px": player_x, "y0": mb.position.y,
 				"cur_y": mb.position.y, "pace0": pace, "moved": false, "t0": Time.get_ticks_msec()}
 		else:
@@ -2662,7 +2717,7 @@ func draw_plate() -> void:
 ## pace gauge in the bottom-left corner, like OutRun's speedometer
 func draw_pace_gauge() -> void:
 	var x := 12.0
-	var y := H - 22
+	var y := H - 22 - (96.0 if pad_on() else 0.0)      # above the ◀ ▶ buttons on phones
 	var w := minf(160, maxf(140, W * 0.36))
 	var h := 10.0
 	var t := (pace - PACE_MIN) / (PACE_MAX - PACE_MIN)
@@ -2697,6 +2752,26 @@ func draw_hud() -> void:
 		Icons.paint(self, "👞", V(cw * 2.5 + (k - (lives - 1) / 2.0) * 24, 31), 22)
 	var p: Dictionary = PLACES[place_at(dist)]
 	text("%s · PARIS %s Arr." % [p.street, p.arr], V(W / 2, HUD_H + 18), 13, Color("1b1e24"), HORIZONTAL_ALIGNMENT_CENTER, font, 4, Color(1, 1, 1, 0.75))
+	draw_pad()
+
+
+## the on-screen pad: translucent discs with a light rim, lit while held
+func draw_pad() -> void:
+	if not (pad_left and pad_left.visible):
+		return
+	for b in [[pad_left, PAD_R, -1.0], [pad_right, PAD_R, 1.0], [pad_jump, PAD_JR, 0.0]]:
+		var c: Vector2 = b[0].position
+		var r: float = b[1]
+		var held: bool = b[0].is_pressed()
+		circ(c.x, c.y, r, Color(0.91, 0.93, 0.96, 0.7))
+		circ(c.x, c.y, r - 2, Color(0.95, 0.82, 0.48, 0.6) if held else Color(0.106, 0.118, 0.141, 0.45))
+		var ink := Color("1b1e24") if held else Color.WHITE
+		if b[2] != 0.0:      # ◀ / ▶
+			var d: float = b[2]
+			fill(PackedVector2Array([V(c.x + d * 11, c.y), V(c.x - d * 7, c.y - 11), V(c.x - d * 7, c.y + 11)]), ink)
+		else:
+			text("점프", V(c.x, c.y + 7), 19, ink)
+	flush()
 
 
 func _fmt(n: int) -> String:
@@ -2761,7 +2836,7 @@ func _build_ui() -> void:
 	], "산책 시작")
 	var keys := Label.new()
 	if DisplayServer.is_touchscreen_available():
-		keys.text = "좌우로 드래그해서 이동 · 위아래로 드래그해서 속도\n짧게 탭하면 점프 · II 버튼으로 일시 정지"
+		keys.text = "◀ ▶ 버튼이나 좌우 드래그로 이동 · 위아래 드래그로 속도\n점프 버튼이나 짧은 탭으로 점프 · II 버튼으로 일시 정지"
 	else:
 		keys.text = "← → 이동 · ↑ ↓ 속도 · Space 점프 · P 정지 · M 소리\n(터치: 드래그로 이동·속도, 탭으로 점프)"
 	keys.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
