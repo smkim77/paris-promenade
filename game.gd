@@ -26,6 +26,7 @@ const SPEED0 := 1050.0         # forward speed at the start, at normal pace
 const JUMP_TIME := 0.55
 const FLY_REACH := 0.2
 const TERRACE_HALF := 0.2
+const STAIN_R := 0.1           # a landed bird dropping: hit radius in road units
 const HUD_H := 46.0
 const SPRAY_LEN := 650.0       # the cleaner's spray covers ±650 units around the truck…
 const SPRAY_REACH := 0.42      # …up to 0.42 road units in from the curb
@@ -931,7 +932,9 @@ func update(dt: float) -> void:
 			f.life -= dt
 	for w in wrecks:
 		w.t += dt
-	# a Molotov smashes where it lands: a direct hit if you're there, and a patch of fire either way
+	# a Molotov smashes where it lands and leaves a patch of fire; the bottle itself doesn't hurt,
+	# only fire you walk into later does (see the fire collisions below). Aimed at the walker, it
+	# often lands right underfoot: that patch is behind you a moment later and never hurts (under).
 	for i in range(molotovs.size() - 1, -1, -1):
 		var m: Dictionary = molotovs[i]
 		m.t += dt
@@ -939,10 +942,9 @@ func update(dt: float) -> void:
 			continue
 		molotovs.remove_at(i)
 		sfx.play("shatter")
-		fires.append({"z": m.z, "x": m.x, "r": 0.28, "kind": "patch", "pile": false, "t": 0.0, "life": 4.5, "seed": randf() * 10.0})
-		if invuln <= 0.0 and absf(m.x - player_x) < 0.3 and absf(m.z - p_z) < 600.0:
-			if take_hit("화염병이다!", Color(0.94, 0.47, 0.12, 0.5), "burn"):
-				return
+		var under: bool = absf(m.z - p_z) < 150.0 and absf(m.x - player_x) < 0.28 + 0.07
+		fires.append({"z": m.z, "x": m.x, "r": 0.28, "kind": "patch", "pile": false, "t": 0.0, "life": 4.5,
+			"seed": randf() * 10.0, "under": under})
 
 	if jump_t > 0.0:
 		jump_t = maxf(0.0, jump_t - dt)
@@ -1003,18 +1005,17 @@ func update(dt: float) -> void:
 	if shake > 0.0:
 		shake -= dt
 
-	# bird droppings land when their timer runs out
+	# bird droppings land when their timer runs out and stay on the pavement; the falling dropping
+	# itself doesn't hurt, stepping in one later does (see the collisions below). One that lands
+	# right underfoot is behind you a moment later and never counts (under).
 	for i in range(drops.size() - 1, -1, -1):
 		var d: Dictionary = drops[i]
 		d.t += dt
 		if d.t < d.T:
 			continue
 		drops.remove_at(i)
-		if invuln <= 0.0 and absf(d.x - player_x) < d.r + 0.05 and absf(d.z - p_z) < 600.0:
-			if take_hit("새똥 명중!", Color(0.96, 0.95, 0.92, 0.6), "birdHit"):
-				return
-		else:
-			stains.append({"z": d.z, "x": d.x, "seed": randf() * 10.0})
+		var under: bool = absf(d.z - p_z) < 150.0 and absf(d.x - player_x) < STAIN_R + 0.07
+		stains.append({"z": d.z, "x": d.x, "seed": randf() * 10.0, "under": under})
 
 	# collisions with things on the pavement (a jump clears poop, fly swarms and puddles)
 	var reach := 60.0 + speed * dt
@@ -1028,6 +1029,16 @@ func update(dt: float) -> void:
 				var sound := "pee" if p.kind == "pee" else ("flies" if p.flies > 0.5 else "splat")
 				var col := Color(0.91, 0.78, 0.29, 0.45) if p.kind == "pee" else Color(0.42, 0.27, 0.14, 0.45)
 				if take_hit(label, col, sound):
+					return
+				break
+	# bird droppings on the pavement: stepped in like poop, cleared by a jump
+	if invuln <= 0.0 and not airborne():
+		for st in stains:
+			if st.get("under", false) or absf(st.z - p_z) > reach:
+				continue
+			if absf(st.x - player_x) < STAIN_R + 0.07:
+				stains.erase(st)
+				if take_hit("으악, 새똥 밟았다!", Color(0.96, 0.95, 0.92, 0.6), "birdHit"):
 					return
 				break
 	# café terrace tables against the wall
@@ -1050,7 +1061,7 @@ func update(dt: float) -> void:
 	# fire: a burning bin is too tall to jump; a patch of fire on the ground can be jumped
 	if invuln <= 0.0:
 		for f in fires:
-			if absf(f.z - p_z) > reach + 40.0:
+			if f.get("under", false) or absf(f.z - p_z) > reach + 40.0:
 				continue
 			if f.kind == "patch" and airborne():
 				continue
