@@ -132,6 +132,18 @@ var pee_t := 0.0
 var shown_place := -1
 var plate := {}
 var drag := {}
+# on-screen pad for phones (touch screens, or `-- --touchpad` to try it with a mouse): a 4-way pad
+# bottom-left (← → steer, ↑ ↓ pace) and a big 점프 button bottom-right, both translucent. Touches are
+# followed per finger, so you can hold a direction while you jump
+var touch_pad := false
+var pad_c := Vector2.ZERO      # centre of the 4-way pad
+var jump_c := Vector2.ZERO     # centre of 점프
+var pad_finger := -2           # touch index holding the pad (-1 = the mouse, -2 = nobody)
+var pad_vec := Vector2.ZERO    # that finger's offset from pad_c, in pad radii
+var jump_lit := 0.0            # 점프 stays lit this long after a press
+var mouse_on_pad := false      # the mouse copy of a touch that landed on the pad: not a drag or tap
+const PAD_R := 64.0
+const JUMP_R := 50.0
 var run_time := 0.0
 
 # ---------- render scratch ----------
@@ -184,6 +196,7 @@ func _ready() -> void:
 	for i in 48:
 		ROOFS.append({"w": 26 + ((i * 37) % 40), "h": 10 + ((i * 53) % 26), "chim": i % 3})
 	_load_save()
+	touch_pad = DisplayServer.is_touchscreen_available() or OS.get_cmdline_user_args().has("--touchpad")
 	_build_ui()
 	_set_mode(hard)
 	_layout()
@@ -202,6 +215,81 @@ func _layout() -> void:
 	HORIZON = H * 0.44
 	K = H * 0.96 - HORIZON                # vertical: walker's feet near the bottom
 	K2 = 0.33 * minf(W, H * 0.9) * CAM_H / ROAD_W   # horizontal: sidewalk spans ~80% of a portrait screen
+	pad_c = V(16 + PAD_R, H - 18 - PAD_R)
+	jump_c = V(W - 22 - JUMP_R, H - 26 - JUMP_R)
+
+
+func pad_shown() -> bool:
+	return touch_pad and state == PLAY
+
+
+## the pad's directions as -1/0/1 per axis; 8-way, with a small dead zone in the middle
+func pad_dirs() -> Vector2i:
+	if pad_finger == -2 or not pad_shown() or pad_vec.length() < 0.25:
+		return Vector2i.ZERO
+	var a := pad_vec.angle()
+	var lim := cos(deg_to_rad(67.5))
+	return Vector2i(int(cos(a) > lim) - int(cos(a) < -lim), int(sin(a) > lim) - int(sin(a) < -lim))
+
+
+func on_pad(pos: Vector2) -> bool:
+	return pad_shown() and (pos.distance_to(pad_c) <= PAD_R * 1.15 or pos.distance_to(jump_c) <= JUMP_R * 1.15)
+
+
+## touches (and, with `--touchpad`, the mouse) on the pad; true when the event was the pad's
+func _pad_input(event: InputEvent) -> bool:
+	var idx := -1
+	var pos := Vector2.ZERO
+	var pressed := false
+	var move := false
+	if event is InputEventScreenTouch:
+		idx = event.index
+		pos = event.position
+		pressed = event.pressed
+	elif event is InputEventScreenDrag:
+		idx = event.index
+		pos = event.position
+		move = true
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.device == InputEvent.DEVICE_ID_EMULATION:      # Godot's mouse copy of a touch handled above
+			if event.pressed:
+				mouse_on_pad = on_pad(event.position)
+				return mouse_on_pad
+			var was := mouse_on_pad
+			mouse_on_pad = false
+			return was
+		pos = event.position
+		pressed = event.pressed
+	elif event is InputEventMouseMotion:
+		if event.device == InputEvent.DEVICE_ID_EMULATION:
+			return mouse_on_pad
+		if pad_finger != -1:
+			return false
+		pos = event.position
+		move = true
+	else:
+		return false
+	if move:
+		if idx != pad_finger:
+			return false
+		pad_vec = (pos - pad_c) / PAD_R
+		return true
+	if not pressed:
+		if idx != pad_finger:
+			return false
+		pad_finger = -2
+		return true
+	if not pad_shown():
+		return false
+	if pos.distance_to(jump_c) <= JUMP_R * 1.15:
+		jump()
+		jump_lit = 0.18
+		return true
+	if pos.distance_to(pad_c) <= PAD_R * 1.15:
+		pad_finger = idx
+		pad_vec = (pos - pad_c) / PAD_R
+		return true
+	return false
 
 
 # ======================================================================
@@ -797,6 +885,12 @@ func update(dt: float) -> void:
 	var down := Input.is_physical_key_pressed(KEY_DOWN) or Input.is_physical_key_pressed(KEY_S)
 	var left := Input.is_physical_key_pressed(KEY_LEFT) or Input.is_physical_key_pressed(KEY_A)
 	var right := Input.is_physical_key_pressed(KEY_RIGHT) or Input.is_physical_key_pressed(KEY_D)
+	var pd := pad_dirs()
+	up = up or pd.y < 0
+	down = down or pd.y > 0
+	left = left or pd.x < 0
+	right = right or pd.x > 0
+	jump_lit = maxf(0.0, jump_lit - dt)
 	if up or down or left or right:
 		drag = {}
 	pace += (int(up) - int(down)) * 0.8 * dt
@@ -1208,6 +1302,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				KEY_ENTER, KEY_KP_ENTER:
 					if state == IDLE or state == OVER:
 						start()
+		return
+	if touch_pad and _pad_input(event):
 		return
 	if state != PLAY:
 		return
@@ -2662,7 +2758,7 @@ func draw_plate() -> void:
 ## pace gauge in the bottom-left corner, like OutRun's speedometer
 func draw_pace_gauge() -> void:
 	var x := 12.0
-	var y := H - 22
+	var y := H - 22 - (PAD_R * 2 + 22 if pad_shown() else 0.0)      # above the pad on phones
 	var w := minf(160, maxf(140, W * 0.36))
 	var h := 10.0
 	var t := (pace - PACE_MIN) / (PACE_MAX - PACE_MIN)
@@ -2697,6 +2793,52 @@ func draw_hud() -> void:
 		Icons.paint(self, "👞", V(cw * 2.5 + (k - (lives - 1) / 2.0) * 24, 31), 22)
 	var p: Dictionary = PLACES[place_at(dist)]
 	text("%s · PARIS %s Arr." % [p.street, p.arr], V(W / 2, HUD_H + 18), 13, Color("1b1e24"), HORIZONTAL_ALIGNMENT_CENTER, font, 4, Color(1, 1, 1, 0.75))
+	draw_pad()
+
+
+## a ring slice from radius r0 to r1 between angles a0 and a1
+func sector(c: Vector2, r0: float, r1: float, a0: float, a1: float, col: Color) -> void:
+	var n := 8
+	for k in n:
+		var t0 := a0 + (a1 - a0) * k / n
+		var t1 := a0 + (a1 - a0) * (k + 1) / n
+		fill(PackedVector2Array([c + Vector2.from_angle(t0) * r0, c + Vector2.from_angle(t0) * r1,
+			c + Vector2.from_angle(t1) * r1, c + Vector2.from_angle(t1) * r0]), col)
+
+
+## the on-screen pad: translucent discs with a light rim, the held direction lit in gold
+func draw_pad() -> void:
+	if not pad_shown():
+		return
+	var dark := Color(0.106, 0.118, 0.141, 0.3)
+	var rim := Color(1, 1, 1, 0.55)
+	var lit := Color(0.95, 0.82, 0.48, 0.5)
+	var c := pad_c
+	circ(c.x, c.y, PAD_R, dark)
+	var d := pad_dirs()
+	for k in 4:      # → ↓ ← ↑
+		var on := [d.x > 0, d.y > 0, d.x < 0, d.y < 0][k] as bool
+		var a := k * PI / 2
+		if on:
+			sector(c, PAD_R * 0.32, PAD_R - 2, a - PI / 4, a + PI / 4, lit)
+		var ax := Vector2.from_angle(a)
+		var tip := c + ax * PAD_R * 0.82
+		var back := c + ax * PAD_R * 0.58
+		var side := ax.orthogonal() * PAD_R * 0.17
+		fill(PackedVector2Array([tip, back + side, back - side]), Color("1b1e24") if on else Color(1, 1, 1, 0.85))
+	ring(c.x, c.y, PAD_R, PAD_R, 3, rim)
+	ring(c.x, c.y, PAD_R * 0.3, PAD_R * 0.3, 2, Color(1, 1, 1, 0.3))
+	if pad_finger != -2:      # thumb knob under the finger
+		var kn := c + pad_vec.limit_length(0.55) * PAD_R
+		circ(kn.x, kn.y, PAD_R * 0.24, Color(1, 1, 1, 0.35))
+	var j := jump_c
+	var held := jump_lit > 0.0
+	circ(j.x, j.y, JUMP_R, lit if held else dark)
+	ring(j.x, j.y, JUMP_R, JUMP_R, 3, rim)
+	var ink := Color("1b1e24") if held else Color.WHITE
+	fill(PackedVector2Array([V(j.x, j.y - 26), V(j.x + 11, j.y - 13), V(j.x - 11, j.y - 13)]), ink)
+	text("점프", V(j.x, j.y + 14), 19, ink)
+	flush()
 
 
 func _fmt(n: int) -> String:
@@ -2760,8 +2902,8 @@ func _build_ui() -> void:
 		"서두를수록 점수가 커지지만, 구석으로만 걸으면 오히려 위험해요.",
 	], "산책 시작")
 	var keys := Label.new()
-	if DisplayServer.is_touchscreen_available():
-		keys.text = "좌우로 드래그해서 이동 · 위아래로 드래그해서 속도\n짧게 탭하면 점프 · II 버튼으로 일시 정지"
+	if touch_pad:
+		keys.text = "왼쪽 아래 방향 버튼(또는 드래그)으로 이동 · 속도\n오른쪽 아래 점프 버튼(또는 탭)으로 점프 · II 버튼으로 일시 정지"
 	else:
 		keys.text = "← → 이동 · ↑ ↓ 속도 · Space 점프 · P 정지 · M 소리\n(터치: 드래그로 이동·속도, 탭으로 점프)"
 	keys.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
